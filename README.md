@@ -1,6 +1,8 @@
 # VibeScholar
 
-O VibeScholar é uma aplicação web acadêmica desenvolvida como MVP para apoiar a produção de textos científicos. O sistema reúne edição, organização, versionamento e análise heurística de documentos em uma interface construída integralmente em Python.
+O VibeScholar é uma aplicação local acadêmica desenvolvida como MVP para apoiar a produção de textos científicos. O sistema reúne edição, organização, versionamento e análise heurística de documentos em uma interface construída integralmente em Python.
+
+Está disponível, temporariamente no Render: h[ttps://vibescholar.onrender.com/dashboard](https://vibescholar.onrender.com/)
 
 ## Objetivo
 
