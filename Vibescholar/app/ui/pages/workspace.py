@@ -172,14 +172,34 @@ def _open_import_dialog(refresh_fn) -> None:
         ui.label("Formatos suportados: .docx · .md · .txt").style("font-size:13px; color:#8b90a0; margin-bottom:20px;")
 
         inp_imp_title = ui.input("Título do documento").style("width:100%;")
-        upload = ui.upload(label="Selecionar arquivo", auto_upload=True).style("width:100%; margin-top:12px;")
+        upload = ui.upload(
+            label="Selecionar arquivo",
+            auto_upload=True,
+            multiple=False,
+            max_files=1,
+            max_file_size=20_000_000,
+            on_rejected=lambda: lbl_imp_err.set_text("Arquivo inválido. Use .docx, .md ou .txt."),
+        ).props('accept=".docx,.md,.txt"').classes("vs-upload-dark").style("width:100%; margin-top:12px;")
+        selected_file_label = ui.label("Nenhum arquivo selecionado").style("color:#8b90a0; font-size:12px;")
         lbl_imp_err = ui.label("").style("color:#ef4444; font-size:13px;")
 
         file_data = {"name": None, "content": None}
 
         def handle_upload(e):
-            file_data["name"] = e.name
-            file_data["content"] = e.content.read()
+            uploaded_file = e.file
+            filename = uploaded_file.name
+            if not filename.lower().endswith((".docx", ".md", ".txt")):
+                file_data["name"] = None
+                file_data["content"] = None
+                selected_file_label.set_text("Nenhum arquivo selecionado")
+                lbl_imp_err.set_text("Arquivo inválido. Use .docx, .md ou .txt.")
+                upload.reset()
+                return
+            file_data["name"] = filename
+            file_data["content"] = uploaded_file.read()
+            selected_file_label.set_text(filename)
+            lbl_imp_err.set_text("")
+            upload.reset()
 
         upload.on_upload(handle_upload)
 

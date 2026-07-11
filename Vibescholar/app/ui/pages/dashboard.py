@@ -20,6 +20,9 @@ def _score_color(score: float) -> str:
     return "#ef4444"
 
 
+_dashboard_refresh_count = 0
+
+
 def _select_valid_current_project(projects: list[dict]) -> dict:
     current = state.get_current_project()
     current_id = current.get("id") if current else None
@@ -161,7 +164,7 @@ def _project_selector(projects: list[dict], refresh_fn) -> None:
                     card.on("click", make_select(proj))
 
 
-def _document_list(refresh_fn) -> None:
+def _document_list(refresh_fn, docs: list[dict] | None = None) -> None:
     project = state.get_current_project()
     if not project:
         with ui.element("div").style(
@@ -170,11 +173,7 @@ def _document_list(refresh_fn) -> None:
             ui.label("Selecione um projeto para ver os documentos").style("font-size:14px; color:#8b90a0;")
         return
 
-    docs = []
-    try:
-        docs = api.api_list_documents(state.get_cookies(), project["id"])
-    except Exception:
-        pass
+    docs = docs or []
 
     with ui.column().style("gap:12px; width:100%;"):
         with ui.row().style("align-items:center; justify-content:space-between; width:100%;"):
@@ -261,7 +260,7 @@ def _document_list(refresh_fn) -> None:
                 row_card.on("click", make_open(doc))
 
 
-def dashboard_page() -> None:
+async def dashboard_page() -> None:
     if not auth_guard():
         return
 
@@ -270,7 +269,10 @@ def dashboard_page() -> None:
     with container:
         @ui.refreshable
         async def dashboard_content():
-            logger.info("dashboard.visual.refresh start")
+            global _dashboard_refresh_count
+            _dashboard_refresh_count += 1
+            refresh_number = _dashboard_refresh_count
+            logger.info("dashboard.visual.refresh start count=%s", refresh_number)
             projects = []
             try:
                 projects = await api.api_list_projects_async(state.get_cookies())
@@ -279,13 +281,14 @@ def dashboard_page() -> None:
                 ui.notify("N?o foi poss?vel carregar seus projetos.", type="negative")
 
             project = _select_valid_current_project(projects)
-            docs_count = 0
+            docs = []
             if project:
                 try:
-                    docs = api.api_list_documents(state.get_cookies(), project["id"])
-                    docs_count = len(docs)
+                    docs = await api.api_list_documents_async(state.get_cookies(), project["id"])
                 except Exception:
                     logger.exception("dashboard.documents.count failed project_id=%s", project.get("id"))
+                    docs = []
+            docs_count = len(docs)
 
             logger.info(
                 "dashboard.counter final projects=%s docs=%s selected_project_id=%s",
@@ -321,7 +324,7 @@ def dashboard_page() -> None:
                 with ui.column().style("gap:0;"):
                     _project_selector(projects, refresh)
                 with ui.column().style("gap:0;"):
-                    _document_list(refresh)
-            logger.info("dashboard.visual.refresh end")
+                    _document_list(refresh, docs)
+            logger.info("dashboard.visual.refresh end count=%s", refresh_number)
 
-        dashboard_content()
+        await dashboard_content()

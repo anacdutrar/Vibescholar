@@ -85,6 +85,14 @@ def api_logout(cookies: Dict[str, str]) -> None:
         c.post("/api/auth/logout")
 
 
+async def api_logout_async(cookies: Dict[str, str]) -> None:
+    async with _async_client(cookies) as c:
+        r = await c.post("/api/auth/logout")
+        if r.status_code >= 400:
+            logger.warning("api_logout status=%s body=%s", r.status_code, r.text)
+        r.raise_for_status()
+
+
 # ─── PROJECTS ────────────────────────────────────────────────────────────────
 
 def api_list_projects(cookies: Dict[str, str]) -> List[Dict]:
@@ -166,6 +174,29 @@ def api_list_documents(cookies: Dict[str, str], project_id: int) -> List[Dict]:
         r = c.get(f"/api/projects/{project_id}/documents")
         r.raise_for_status()
         return r.json()
+
+
+async def api_list_documents_async(cookies: Dict[str, str], project_id: int) -> List[Dict]:
+    start = time.perf_counter()
+    url = f"{BASE_URL}/api/projects/{project_id}/documents"
+    logger.info("dashboard.documents.load start url=%s project_id=%s", url, project_id)
+    async with _async_client(cookies) as c:
+        r = await c.get(f"/api/projects/{project_id}/documents")
+        logger.info(
+            "dashboard.documents.load response status=%s elapsed=%.4f",
+            r.status_code,
+            time.perf_counter() - start,
+        )
+        if r.status_code >= 400:
+            logger.warning("dashboard.documents.load error status=%s body=%s", r.status_code, r.text)
+        r.raise_for_status()
+        documents = r.json()
+        logger.info(
+            "dashboard.documents.load done count=%s elapsed=%.4f",
+            len(documents),
+            time.perf_counter() - start,
+        )
+        return documents
 
 
 def api_create_document(cookies: Dict[str, str], project_id: int, title: str,

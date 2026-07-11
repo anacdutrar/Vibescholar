@@ -205,6 +205,33 @@ body, .nicegui-content { background: var(--bg-base) !important; color: var(--tex
 .bg-card  { background: var(--bg-card) !important; }
 .bg-card2 { background: var(--bg-card2) !important; }
 
+/* upload */
+.vs-upload-dark,
+.vs-upload-dark .q-uploader,
+.vs-upload-dark .q-uploader__header,
+.vs-upload-dark .q-uploader__list {
+  background: var(--bg-card2) !important;
+  color: var(--text-primary) !important;
+}
+.vs-upload-dark .q-uploader {
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-sm) !important;
+  box-shadow: none !important;
+}
+.vs-upload-dark .q-uploader__header {
+  border-bottom: 1px solid var(--border) !important;
+}
+.vs-upload-dark .q-uploader__title,
+.vs-upload-dark .q-uploader__subtitle,
+.vs-upload-dark .q-uploader__file,
+.vs-upload-dark .q-btn,
+.vs-upload-dark .q-icon {
+  color: var(--text-primary) !important;
+}
+.vs-upload-dark .q-uploader__subtitle {
+  color: var(--text-muted) !important;
+}
+
 /* gradient text */
 .grad-text {
   background: linear-gradient(135deg, #818cf8, #6366f1, #a78bfa);

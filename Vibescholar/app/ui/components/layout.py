@@ -4,6 +4,7 @@ VibeScholar – Shared Layout Components
 Provides: header bar, sidebar navigation, auth guard.
 """
 from nicegui import ui
+from app.core.logging import logger
 from app.ui import state
 from app.ui import api_client as api
 
@@ -95,10 +96,14 @@ def sidebar(current_page: str) -> None:
                 ui.label(username).style("font-size:13px; font-weight:600; color:#f0f2ff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;")
                 ui.label("Online").style("font-size:11px; color:#22c55e;")
 
-        def do_logout():
-            api.api_logout(state.get_cookies())
-            state.clear_session()
-            ui.navigate.to("/")
+        async def do_logout():
+            try:
+                await api.api_logout_async(state.get_cookies())
+            except Exception:
+                logger.exception("Logout request failed; clearing local session anyway")
+            finally:
+                state.clear_session()
+                ui.navigate.to("/")
 
         ui.button("Sair", icon="logout", on_click=do_logout).style(
             "width:100%; background:transparent; color:#8b90a0; border:1px solid rgba(255,255,255,.07); "

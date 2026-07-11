@@ -57,9 +57,9 @@ def page_login():
 
 
 @ui.page("/dashboard")
-def page_dashboard():
+async def page_dashboard():
     from app.ui.pages.dashboard import dashboard_page
-    dashboard_page()
+    await dashboard_page()
 
 
 @ui.page("/workspace")
