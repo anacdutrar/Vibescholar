@@ -50,8 +50,8 @@ def validation_error_message(detail: Any) -> str:
         msg = item.get("msg", "") if isinstance(item, dict) else str(item)
         if field == "email":
             messages.append("E-mail inválido")
-        elif field == "password" and ("too_short" in error_type or "at least" in msg.lower()):
-            messages.append("Senha muito curta, min: 8")
+        elif field == "password" and ("too_short" in error_type or "too_short" in msg.lower() or "at least" in msg.lower()):
+            messages.append("Senha muito curta")
         elif "missing" in error_type:
             messages.append("Campo obrigatório ausente")
         else:
@@ -92,6 +92,18 @@ def api_list_projects(cookies: Dict[str, str]) -> List[Dict]:
         r = c.get("/api/projects")
         r.raise_for_status()
         return r.json()
+
+
+async def api_list_projects_async(cookies: Dict[str, str]) -> List[Dict]:
+    logger.info("dashboard.projects.load start url=%s", f"{BASE_URL}/api/projects")
+    async with _async_client(cookies) as c:
+        r = await c.get("/api/projects")
+        if r.status_code >= 400:
+            logger.warning("dashboard.projects.load error status=%s body=%s", r.status_code, r.text)
+        r.raise_for_status()
+        projects = r.json()
+        logger.info("dashboard.projects.load returned count=%s", len(projects))
+        return projects
 
 
 def api_create_project(cookies: Dict[str, str], name: str, description: str = "") -> Dict:

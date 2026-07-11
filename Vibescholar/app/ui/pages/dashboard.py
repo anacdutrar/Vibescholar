@@ -20,13 +20,23 @@ def _score_color(score: float) -> str:
     return "#ef4444"
 
 
-def _project_selector(refresh_fn) -> None:
-    projects = []
-    try:
-        projects = api.api_list_projects(state.get_cookies())
-    except Exception:
-        pass
+def _select_valid_current_project(projects: list[dict]) -> dict:
+    current = state.get_current_project()
+    current_id = current.get("id") if current else None
+    selected = next((project for project in projects if project["id"] == current_id), None)
+    if selected:
+        state.set_current_project(selected)
+        logger.info("dashboard.projects.selected id=%s name=%s", selected.get("id"), selected.get("name"))
+        return selected
+    if current:
+        logger.info("dashboard.projects.selected cleared invalid_current_id=%s", current_id)
+        state.set_current_project({})
+        state.set_current_document({})
+    logger.info("dashboard.projects.selected none")
+    return {}
 
+
+def _project_selector(projects: list[dict], refresh_fn) -> None:
     current = state.get_current_project()
     current_id = current.get("id") if current else None
 
@@ -68,11 +78,12 @@ def _project_selector(refresh_fn) -> None:
                         proj = await api.api_create_project_async(state.get_cookies(), name, description)
                         logger.info("project.create before state update elapsed=%.4f", time.perf_counter() - start)
                         state.set_current_project(proj)
+                        state.set_current_document({})
                         logger.info("project.create after state update elapsed=%.4f", time.perf_counter() - start)
                         dlg_new_proj.close()
-                        logger.info("project.create before dashboard refresh elapsed=%.4f", time.perf_counter() - start)
-                        refresh_fn()
-                        logger.info("project.create after dashboard refresh elapsed=%.4f", time.perf_counter() - start)
+                        logger.info("project.create before visual refresh elapsed=%.4f", time.perf_counter() - start)
+                        await refresh_fn()
+                        logger.info("project.create after visual refresh elapsed=%.4f", time.perf_counter() - start)
                     except httpx.HTTPStatusError as e:
                         logger.exception(
                             "project.create HTTPStatusError type=%s status=%s body=%s",
@@ -141,10 +152,10 @@ def _project_selector(refresh_fn) -> None:
                         ui.element("span").classes("vs-chip").add_slot("default", f"<span>🗂️ Ativo</span>")
 
                     def make_select(p=proj):
-                        def select():
+                        async def select():
                             state.set_current_project(p)
                             state.set_current_document({})
-                            refresh_fn()
+                            await refresh_fn()
                         return select
 
                     card.on("click", make_select(proj))
@@ -257,41 +268,60 @@ def dashboard_page() -> None:
     container = app_layout("/dashboard", "Dashboard", "Gerencie seus projetos e documentos")
 
     with container:
-        # Stats row
-        project = state.get_current_project()
-        docs_count = 0
-        if project:
+        @ui.refreshable
+        async def dashboard_content():
+            logger.info("dashboard.visual.refresh start")
+            projects = []
             try:
-                docs = api.api_list_documents(state.get_cookies(), project["id"])
-                docs_count = len(docs)
+                projects = await api.api_list_projects_async(state.get_cookies())
             except Exception:
-                pass
+                logger.exception("dashboard.projects.load failed")
+                ui.notify("N?o foi poss?vel carregar seus projetos.", type="negative")
 
-        with ui.grid(columns=3).style("gap:16px; width:100%; margin-bottom:28px;"):
-            for icon, label, val, color in [
-                ("folder", "Projeto Ativo", project["name"] if project else "—", "#6366f1"),
-                ("description", "Documentos", str(docs_count), "#22c55e"),
-                ("verified", "Status", "Online", "#f59e0b"),
-            ]:
-                with ui.element("div").style(
-                    f"background:#1a1d27; border:1px solid rgba(255,255,255,.08); "
-                    f"border-radius:12px; padding:20px; display:flex; align-items:center; gap:14px;"
-                ):
-                    ui.element("div").style(
-                        f"width:44px;height:44px;border-radius:10px;background:{color}22;"
-                        f"display:flex;align-items:center;justify-content:center;"
-                        f"color:{color};font-size:20px;flex-shrink:0;"
-                    ).add_slot("default", f'<span class="material-icons">{icon}</span>')
-                    with ui.column().style("gap:2px;"):
-                        ui.label(label).style("font-size:11px; font-weight:600; color:#8b90a0; letter-spacing:.5px; text-transform:uppercase;")
-                        ui.label(val).style("font-size:18px; font-weight:800; color:#f0f2ff;")
+            project = _select_valid_current_project(projects)
+            docs_count = 0
+            if project:
+                try:
+                    docs = api.api_list_documents(state.get_cookies(), project["id"])
+                    docs_count = len(docs)
+                except Exception:
+                    logger.exception("dashboard.documents.count failed project_id=%s", project.get("id"))
 
-        def refresh():
-            ui.navigate.to("/dashboard")
+            logger.info(
+                "dashboard.counter final projects=%s docs=%s selected_project_id=%s",
+                len(projects),
+                docs_count,
+                project.get("id") if project else None,
+            )
 
-        # Two column layout
-        with ui.grid(columns=2).style("gap:20px; width:100%;"):
-            with ui.column().style("gap:0;"):
-                _project_selector(refresh)
-            with ui.column().style("gap:0;"):
-                _document_list(refresh)
+            with ui.grid(columns=3).style("gap:16px; width:100%; margin-bottom:28px;"):
+                for icon, label, val, color in [
+                    ("folder", "Projeto Ativo", project["name"] if project else "?", "#6366f1"),
+                    ("description", "Projetos", str(len(projects)), "#22c55e"),
+                    ("verified", "Documentos", str(docs_count), "#f59e0b"),
+                ]:
+                    with ui.element("div").style(
+                        f"background:#1a1d27; border:1px solid rgba(255,255,255,.08); "
+                        f"border-radius:12px; padding:20px; display:flex; align-items:center; gap:14px;"
+                    ):
+                        ui.element("div").style(
+                            f"width:44px;height:44px;border-radius:10px;background:{color}22;"
+                            f"display:flex;align-items:center;justify-content:center;"
+                            f"color:{color};font-size:20px;flex-shrink:0;"
+                        ).add_slot("default", f'<span class="material-icons">{icon}</span>')
+                        with ui.column().style("gap:2px;"):
+                            ui.label(label).style("font-size:11px; font-weight:600; color:#8b90a0; letter-spacing:.5px; text-transform:uppercase;")
+                            ui.label(val).style("font-size:18px; font-weight:800; color:#f0f2ff;")
+
+            async def refresh():
+                logger.info("dashboard.visual.refresh requested")
+                await dashboard_content.refresh()
+
+            with ui.grid(columns=2).style("gap:20px; width:100%;"):
+                with ui.column().style("gap:0;"):
+                    _project_selector(projects, refresh)
+                with ui.column().style("gap:0;"):
+                    _document_list(refresh)
+            logger.info("dashboard.visual.refresh end")
+
+        dashboard_content()
