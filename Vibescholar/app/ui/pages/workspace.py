@@ -99,12 +99,42 @@ async def _read_upload_file(uploaded_file) -> tuple[str, bytes]:
     return uploaded_file.name, await uploaded_file.read()
 
 
-def _has_apparent_citation(text: str) -> bool:
-    return bool(
-        re.search(r"\([A-ZÀ-ÖØ-Ý][^)]{1,80},\s*(19|20)\d{2}\)", text, re.IGNORECASE)
-        or re.search(r"\[\d+(?:-\d+)?\]", text)
-        or re.search(r"\b10\.\d{4,9}/\S+", text)
+def _detect_apparent_citation(text: str) -> dict | None:
+    doi_match = re.search(r"\b10\.\d{4,9}/[^\s\]\)},;]+", text, re.IGNORECASE)
+    author_year_match = re.search(
+        r"\(([A-ZÀ-ÖØ-Ý][\wÀ-ÿ'’-]+)(?:\s+et\s+al\.)?,\s*((?:19|20)\d{2})\)",
+        text,
+        re.IGNORECASE,
     )
+    numeric_match = re.search(r"\[\d+(?:-\d+)?\]", text)
+    if doi_match:
+        doi = doi_match.group(0).rstrip(".,;:")
+        return {"raw": doi, "doi": doi, "author": None, "year": None}
+    if author_year_match:
+        return {
+            "raw": author_year_match.group(0),
+            "doi": None,
+            "author": author_year_match.group(1),
+            "year": int(author_year_match.group(2)),
+        }
+    if numeric_match:
+        return {"raw": numeric_match.group(0), "doi": None, "author": None, "year": None}
+    return None
+
+
+def _has_apparent_citation(text: str) -> bool:
+    return _detect_apparent_citation(text) is not None
+
+
+def _reference_matches_citation(reference: dict, citation: dict) -> bool:
+    if citation.get("doi"):
+        return (reference.get("doi") or "").strip().lower() == citation["doi"].strip().lower()
+    if citation.get("author") and citation.get("year") is not None:
+        return (
+            citation["author"].strip().lower() in (reference.get("authors") or "").lower()
+            and reference.get("year") == citation["year"]
+        )
+    return False
 
 
 def _paragraph_key(sentence: dict) -> str:
@@ -413,7 +443,11 @@ async def _right_panel(doc: dict, refresh_fn) -> None:
                 )
             else:
                 paragraph_filter = {"value": "all"}
+                ignored_citations: set[int] = set()
                 options = _paragraph_filter_options(sentences)
+
+                async def refresh_sentence_panel() -> None:
+                    sentence_cards.refresh()
 
                 @ui.refreshable
                 def sentence_cards() -> None:
@@ -439,6 +473,12 @@ async def _right_panel(doc: dict, refresh_fn) -> None:
                         }.get(status, "Não verificada")
                         approved_count = int(sent.get("approved_evidence_count") or 0)
                         approved_titles = sent.get("approved_reference_titles") or []
+                        citation = _detect_apparent_citation(sent["text"])
+                        citation_needs_review = (
+                            citation is not None
+                            and approved_count == 0
+                            and sent["id"] not in ignored_citations
+                        )
 
                         with ui.element("div").style(
                             "background:#212435; border:1px solid rgba(255,255,255,.07); border-radius:8px; "
@@ -454,9 +494,12 @@ async def _right_panel(doc: dict, refresh_fn) -> None:
                                     "default", f"<span>{pill_label}</span>"
                                 )
 
-                            if _has_apparent_citation(sent["text"]):
+                            if citation_needs_review:
                                 ui.label("Citação detectada — verificação necessária").style(
                                     "font-size:11px; color:#f59e0b; margin-bottom:6px;"
+                                )
+                                ui.label(f"Padrão detectado: {citation['raw']}").style(
+                                    "font-size:11px; color:#d5d8e2; margin-bottom:6px;"
                                 )
                             ui.label(f"{approved_count} evidência(s) aprovada(s)").style(
                                 "font-size:11px; color:#8b90a0;"
@@ -469,15 +512,35 @@ async def _right_panel(doc: dict, refresh_fn) -> None:
 
                             def make_search(s=sent):
                                 async def search_ev():
-                                    await _evidence_panel(s, doc, refresh_fn)
+                                    await _evidence_panel(s, doc, refresh_sentence_panel)
                                 return search_ev
+
+                            def make_review(s=sent, detected=citation):
+                                async def review_citation():
+                                    await _citation_review_dialog(
+                                        s,
+                                        doc,
+                                        detected,
+                                        ignored_citations,
+                                        refresh_sentence_panel,
+                                    )
+                                return review_citation
 
                             action_label = (
                                 "Ver / adicionar evidências"
                                 if approved_count > 0
-                                else "Buscar evidências"
+                                else (
+                                    "Revisar citação detectada"
+                                    if citation_needs_review
+                                    else "Buscar evidências"
+                                )
                             )
-                            ui.button(action_label, on_click=make_search(sent)).style(
+                            action_callback = (
+                                make_review(sent, citation)
+                                if citation_needs_review
+                                else make_search(sent)
+                            )
+                            ui.button(action_label, on_click=action_callback).style(
                                 "background:rgba(99,102,241,.12); border:1px solid rgba(99,102,241,.25); "
                                 "color:#818cf8; border-radius:6px; font-size:11px; padding:4px 12px; margin-top:8px;"
                             )
@@ -531,6 +594,107 @@ async def _right_panel(doc: dict, refresh_fn) -> None:
         # ── Version history ──────────────────────────────────────────────────
         with ui.tab_panel(t_history):
             await _version_selector(doc, refresh_fn)
+
+
+async def _citation_review_dialog(
+    sentence: dict,
+    doc: dict,
+    citation: dict,
+    ignored_citations: set[int],
+    refresh_sentence_panel,
+) -> None:
+    with ui.dialog() as dialog, ui.card().style(
+        "background:#1a1d27; border:1px solid rgba(255,255,255,.08); border-radius:16px; "
+        "padding:28px; min-width:600px; max-width:700px;"
+    ):
+        ui.label("Revisar citação detectada").style(
+            "font-size:18px; font-weight:700; color:#f0f2ff;"
+        )
+        ui.label(f"Padrão detectado: {citation['raw']}").style(
+            "font-size:13px; color:#f59e0b; margin:6px 0 16px;"
+        )
+
+        try:
+            suggestions = await api.api_search_evidence_async(
+                state.get_cookies(), sentence["id"]
+            )
+        except Exception as exc:
+            ui.label(f"Erro ao localizar referências: {str(exc)[:80]}").style(
+                "font-size:13px; color:#ef4444;"
+            )
+            suggestions = []
+
+        matches = [
+            suggestion
+            for suggestion in suggestions
+            if _reference_matches_citation(suggestion.get("reference") or {}, citation)
+        ]
+
+        if matches:
+            for suggestion in matches:
+                reference = suggestion.get("reference") or {}
+                with ui.element("div").style(
+                    "background:#212435; border:1px solid rgba(255,255,255,.07); "
+                    "border-radius:8px; padding:14px; margin-bottom:10px;"
+                ):
+                    ui.label(reference.get("title") or "Sem título").style(
+                        "font-size:14px; font-weight:700; color:#f0f2ff;"
+                    )
+                    ui.label(reference.get("authors") or "Autores não informados").style(
+                        "font-size:12px; color:#b8bdcc;"
+                    )
+                    ui.label(
+                        f"Ano: {reference.get('year') or 'não informado'} · "
+                        f"DOI: {reference.get('doi') or 'não informado'}"
+                    ).style("font-size:11px; color:#8b90a0; margin:4px 0 10px;")
+
+                    async def confirm_match(
+                        suggestion_id=suggestion["id"], matched_reference=reference
+                    ) -> None:
+                        try:
+                            await api.api_update_suggestion_status_async(
+                                state.get_cookies(), suggestion_id, "APPROVED"
+                            )
+                        except Exception as exc:
+                            ui.notify(
+                                f"Erro ao confirmar evidência: {str(exc)[:80]}",
+                                type="negative",
+                            )
+                            return
+
+                        titles = sentence.setdefault("approved_reference_titles", [])
+                        title = matched_reference.get("title")
+                        if title and title not in titles:
+                            titles.append(title)
+                        sentence["approved_evidence_count"] = len(titles) or 1
+                        sentence["status"] = "SUPPORTED"
+                        ui.notify("Citação confirmada como evidência.", type="positive")
+                        dialog.close()
+                        await refresh_sentence_panel()
+
+                    ui.button(
+                        "Confirmar como evidência", on_click=confirm_match
+                    ).classes("vs-btn").style("font-size:12px;")
+        else:
+            ui.label("Nenhuma referência correspondente encontrada na biblioteca").style(
+                "font-size:13px; color:#b8bdcc; margin-bottom:10px;"
+            )
+
+            async def search_suggestions() -> None:
+                dialog.close()
+                await _evidence_panel(sentence, doc, refresh_sentence_panel)
+
+            ui.button("Buscar sugestões", on_click=search_suggestions).classes("vs-btn")
+
+        async def ignore_citation() -> None:
+            ignored_citations.add(sentence["id"])
+            dialog.close()
+            await refresh_sentence_panel()
+
+        with ui.row().style("gap:8px; margin-top:16px; width:100%;"):
+            ui.button("Ignorar citação detectada", on_click=ignore_citation).classes("vs-btn-ghost")
+            ui.button("Fechar", on_click=dialog.close).classes("vs-btn-ghost")
+    dialog.open()
 
 
 async def _evidence_panel(sentence: dict, doc: dict, refresh_fn) -> None:

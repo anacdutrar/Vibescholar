@@ -31,6 +31,31 @@ class ReferenceRepository:
         ).all()
 
     @staticmethod
+    def find_citation_matches(
+        db: Session,
+        project_id: int,
+        doi: Optional[str] = None,
+        author: Optional[str] = None,
+        year: Optional[int] = None,
+    ) -> List[ProjectReference]:
+        base_query = db.query(ProjectReference).filter(
+            or_(ProjectReference.project_id == project_id, ProjectReference.project_id.is_(None)),
+            ProjectReference.deleted_at.is_(None),
+        )
+        if doi:
+            doi_matches = base_query.filter(
+                func.lower(ProjectReference.doi) == doi.strip().lower()
+            ).all()
+            if doi_matches:
+                return doi_matches
+        if author and year is not None:
+            return base_query.filter(
+                func.lower(ProjectReference.authors).contains(author.strip().lower()),
+                ProjectReference.year == year,
+            ).all()
+        return []
+
+    @staticmethod
     def find_active_by_doi_or_title_year(
         db: Session,
         doi: Optional[str],

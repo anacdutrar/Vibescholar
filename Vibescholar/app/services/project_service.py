@@ -34,6 +34,24 @@ class ProjectService:
             )
 
         normalized_project = ProjectCreate(name=project_name, description=project_in.description)
+        deleted_project = ProjectRepository.get_deleted_by_user_and_name(
+            self.db, user_id, project_name
+        )
+        if deleted_project:
+            try:
+                project = ProjectRepository.restore(
+                    self.db, deleted_project, normalized_project.description
+                )
+                if not ProjectSettingsRepository.get_by_project_id(self.db, project.id):
+                    ProjectSettingsRepository.create_default(self.db, project.id)
+                return project
+            except IntegrityError:
+                self.db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Já existe um projeto com esse nome."
+                )
+
         try:
             project = ProjectRepository.create(self.db, user_id, normalized_project)
         except IntegrityError:

@@ -1,4 +1,5 @@
 from fastapi import Depends, HTTPException
+import re
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from typing import List, Dict, Any
@@ -13,6 +14,26 @@ from app.services.quality_analyzer import QualityAnalyzer
 from app.exceptions.document import DocumentNotFoundException
 from app.exceptions.reference import SuggestionNotFoundException
 from app.core.logging import logger
+
+
+def extract_citation_hints(text: str) -> Dict[str, Any] | None:
+    doi_match = re.search(r"\b10\.\d{4,9}/[^\s\]\)},;]+", text, re.IGNORECASE)
+    author_year_match = re.search(
+        r"\(([A-ZÀ-ÖØ-Ý][\wÀ-ÿ'’-]+)(?:\s+et\s+al\.)?,\s*((?:19|20)\d{2})\)",
+        text,
+        re.IGNORECASE,
+    )
+    if doi_match:
+        doi = doi_match.group(0).rstrip(".,;:")
+        return {"raw": doi, "doi": doi, "author": None, "year": None}
+    if author_year_match:
+        return {
+            "raw": author_year_match.group(0),
+            "doi": None,
+            "author": author_year_match.group(1),
+            "year": int(author_year_match.group(2)),
+        }
+    return None
 
 class GroundingService:
     def __init__(self, db: Session = Depends(get_db)):
@@ -87,6 +108,23 @@ class GroundingService:
         terminal_reference_ids = {
             item.reference_id for item in existing if item.status in {"APPROVED", "REJECTED"}
         }
+        citation_hints = extract_citation_hints(sentence.text)
+        citation_matches = []
+        if citation_hints:
+            citation_matches = ReferenceRepository.find_citation_matches(
+                self.db,
+                doc.project_id,
+                doi=citation_hints.get("doi"),
+                author=citation_hints.get("author"),
+                year=citation_hints.get("year"),
+            )
+        citation_reference_ids = {reference.id for reference in citation_matches}
+        logger.info(
+            "evidence.search.citation sentence_id=%s pattern=%s reference_ids=%s",
+            sentence.id,
+            citation_hints.get("raw") if citation_hints else None,
+            sorted(citation_reference_ids),
+        )
 
         # Call EvidenceService search
         evidence_service = EvidenceService()
@@ -108,6 +146,14 @@ class GroundingService:
                 status_code=409,
                 detail="Não foi possível preparar as referências de evidência.",
             )
+
+        provider_match_count = len(matching_refs)
+        matching_refs = list({
+            reference.id: reference
+            for reference in list(citation_matches) + matching_refs
+        }.values())
+        if provider_match_count:
+            matching_refs = matching_refs[:provider_match_count]
 
         suggestions = [item for item in existing if item.status == "APPROVED"]
         returned_ids = {item.id for item in suggestions}
@@ -144,7 +190,9 @@ class GroundingService:
                 existing_by_reference[ref.id] = sug
 
             sug.reference = ref
-            if sug.status != "REJECTED" and sug.id not in returned_ids:
+            if (
+                sug.status != "REJECTED" or ref.id in citation_reference_ids
+            ) and sug.id not in returned_ids:
                 suggestions.append(sug)
                 returned_ids.add(sug.id)
 

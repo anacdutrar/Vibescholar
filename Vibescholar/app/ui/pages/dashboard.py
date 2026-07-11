@@ -43,7 +43,9 @@ def _select_valid_current_project(projects: list[dict]) -> dict:
     return {}
 
 
-def _project_selector(projects: list[dict], refresh_fn, open_delete_dialog) -> None:
+def _project_selector(
+    projects: list[dict], refresh_fn, open_delete_dialog, restored_project_names: set[str]
+) -> None:
     current = state.get_current_project()
     current_id = current.get("id") if current else None
 
@@ -88,6 +90,11 @@ def _project_selector(projects: list[dict], refresh_fn, open_delete_dialog) -> N
                         state.set_current_project(proj)
                         state.set_current_document({})
                         logger.info("project.create after state update elapsed=%.4f", time.perf_counter() - start)
+                        if name in restored_project_names:
+                            restored_project_names.discard(name)
+                            ui.notify("Projeto restaurado com sucesso.", type="positive")
+                        else:
+                            ui.notify("Projeto criado com sucesso.", type="positive")
                         dlg_new_proj.close()
                         logger.info("project.create before visual refresh elapsed=%.4f", time.perf_counter() - start)
                         create_project_running["value"] = False
@@ -102,7 +109,7 @@ def _project_selector(projects: list[dict], refresh_fn, open_delete_dialog) -> N
                             e.response.text,
                         )
                         if e.response.status_code == 409:
-                            message = "J? existe um projeto com esse nome."
+                            message = "Já existe um projeto com esse nome."
                             lbl_err.set_text(message)
                             ui.notify(message, type="warning")
                         else:
@@ -122,7 +129,7 @@ def _project_selector(projects: list[dict], refresh_fn, open_delete_dialog) -> N
                     ui.button("Cancelar", on_click=dlg_new_proj.close).classes("vs-btn-ghost")
                     btn_create_project = ui.button("Criar Projeto", on_click=create_project).classes("vs-btn")
 
-            ui.button("+ Novo Projeto", on_click=dlg_new_proj.open).classes("vs-btn").style("font-size:13px; padding:6px 16px !important;")
+            ui.button("+NOVO/RESTAURAR PROJETO", on_click=dlg_new_proj.open).classes("vs-btn").style("font-size:13px; padding:6px 16px !important;")
 
         if not projects:
             with ui.element("div").style(
@@ -378,6 +385,7 @@ async def dashboard_page() -> None:
 
     with container:
         project_pending_delete = {"project": None, "total_open_callbacks": 0}
+        restored_project_names: set[str] = set()
 
         @ui.refreshable
         async def dashboard_content():
@@ -434,7 +442,9 @@ async def dashboard_page() -> None:
 
             with ui.grid(columns=2).style("gap:20px; width:100%;"):
                 with ui.column().style("gap:0;"):
-                    _project_selector(projects, refresh, open_project_delete_dialog)
+                    _project_selector(
+                        projects, refresh, open_project_delete_dialog, restored_project_names
+                    )
                 with ui.column().style("gap:0;"):
                     _document_list(refresh, docs)
             logger.info("dashboard.visual.refresh end count=%s", refresh_number)
@@ -474,6 +484,7 @@ async def dashboard_page() -> None:
 
                 project_delete_dialog.close()
                 project_pending_delete["project"] = None
+                restored_project_names.add(project["name"].strip())
                 if state.get_current_project().get("id") == project["id"]:
                     state.set_current_project({})
                     state.set_current_document({})

@@ -9,7 +9,7 @@ from sqlalchemy.pool import StaticPool
 from app.core.database import Base, get_db
 from app.app import fastapi_app
 from app.core.security import hash_password
-from app.models.user import User
+from app.models.user import Project, User
 from app.models.document import DocumentVersion, Sentence
 from app.models.project_settings import ProjectSettings
 from app.models.reference import EvidenceSuggestion, ProjectReference
@@ -17,7 +17,12 @@ from app.repositories.reference_repository import ReferenceRepository
 from app.schemas.request import UserCreate
 from app.ui import api_client
 from app.ui.pages import dashboard
-from app.ui.pages.workspace import _filter_sentences_by_paragraph, _paragraph_filter_options
+from app.ui.pages.workspace import (
+    _detect_apparent_citation,
+    _filter_sentences_by_paragraph,
+    _paragraph_filter_options,
+    _reference_matches_citation,
+)
 from app.utils.text_normalizer import normalize_text
 
 # StaticPool forces ALL connections to reuse the same single in-memory connection.
@@ -326,7 +331,11 @@ def test_document_import_and_export(client):
     assert b"Primeira frase do documento importado" in export_res.content
 
 
-def _create_grounding_context(client, project_name="Grounding Project"):
+def _create_grounding_context(
+    client,
+    project_name="Grounding Project",
+    content="A inteligência artificial melhora a recuperação de informação científica.",
+):
     client.post("/api/auth/login", json={
         "username": "testuser",
         "password": "testpass123",
@@ -336,7 +345,7 @@ def _create_grounding_context(client, project_name="Grounding Project"):
     project_id = project_res.json()["id"]
     document_res = client.post(f"/api/projects/{project_id}/documents", json={
         "title": "Documento de evidências",
-        "content": "A inteligência artificial melhora a recuperação de informação científica.",
+        "content": content,
     })
     assert document_res.status_code == 201
     document_id = document_res.json()["id"]
@@ -476,3 +485,129 @@ def test_sentence_paragraph_filter_is_local_and_handles_unidentified():
     assert [item["id"] for item in _filter_sentences_by_paragraph(sentences, "2")] == [3]
     assert [item["id"] for item in _filter_sentences_by_paragraph(sentences, "unidentified")] == [4]
     assert len(_filter_sentences_by_paragraph(sentences, "all")) == 4
+
+
+def test_soft_deleted_project_is_restored_with_same_logical_record(client, db_session):
+    client.post("/api/auth/login", json={
+        "username": "testuser",
+        "password": "testpass123",
+    })
+    created = client.post("/api/projects", json={
+        "name": "Projeto restaurável",
+        "description": "Descrição original",
+    })
+    assert created.status_code == 201
+    project_id = created.json()["id"]
+
+    deleted = client.delete(f"/api/projects/{project_id}")
+    assert deleted.status_code == 200
+    assert db_session.query(Project).filter(Project.id == project_id).one().deleted_at is not None
+
+    restored = client.post("/api/projects", json={
+        "name": "  Projeto restaurável  ",
+        "description": "Descrição restaurada",
+    })
+    assert restored.status_code == 201
+    assert restored.json()["id"] == project_id
+
+    logical_projects = db_session.query(Project).filter(
+        Project.user_id == restored.json()["user_id"],
+        Project.name == "Projeto restaurável",
+    ).all()
+    assert len(logical_projects) == 1
+    assert logical_projects[0].deleted_at is None
+    assert logical_projects[0].description == "Descrição restaurada"
+    assert db_session.query(ProjectSettings).filter(
+        ProjectSettings.project_id == project_id
+    ).count() == 1
+
+    active_duplicate = client.post("/api/projects", json={"name": "Projeto restaurável"})
+    assert active_duplicate.status_code == 409
+    assert active_duplicate.json()["detail"] == "Já existe um projeto com esse nome."
+
+
+def test_citation_doi_match_confirmation_is_real_and_not_duplicated(client, db_session):
+    project_id, document_id, sentence = _create_grounding_context(
+        client,
+        "DOI Citation Project",
+        "O método apresentou resultados consistentes 10.7777/metodo.2022.1.",
+    )
+    reference = ProjectReference(
+        project_id=project_id,
+        title="Método científico aplicado",
+        authors="Marina Costa",
+        journal="Revista de Metodologia",
+        year=2022,
+        doi="10.7777/metodo.2022.1",
+        qualis_score="A1",
+        availability="ABERTO",
+    )
+    db_session.add(reference)
+    db_session.commit()
+
+    assert sentence["status"] == "UNVERIFIED"
+    assert _detect_apparent_citation(sentence["text"])["doi"] == "10.7777/metodo.2022.1"
+
+    search = client.post("/api/sentences/search/evidence", json={"sentence_id": sentence["id"]})
+    assert search.status_code == 200
+    match = next(item for item in search.json() if item["reference_id"] == reference.id)
+    assert match["status"] == "PENDING"
+
+    first_confirmation = client.put(
+        f"/api/evidence-suggestions/{match['id']}", json={"status": "APPROVED"}
+    )
+    second_confirmation = client.put(
+        f"/api/evidence-suggestions/{match['id']}", json={"status": "APPROVED"}
+    )
+    assert first_confirmation.status_code == 200
+    assert second_confirmation.status_code == 200
+    assert db_session.query(EvidenceSuggestion).filter(
+        EvidenceSuggestion.document_version_id == sentence["document_version_id"],
+        EvidenceSuggestion.sentence_uuid == sentence["sentence_uuid"],
+        EvidenceSuggestion.reference_id == reference.id,
+    ).count() == 1
+
+    updated_sentence = client.get(f"/api/documents/{document_id}/sentences").json()[0]
+    assert updated_sentence["status"] == "SUPPORTED"
+    assert updated_sentence["approved_evidence_count"] == 1
+
+
+def test_citation_author_year_matches_library_without_auto_support(client, db_session):
+    project_id, _, sentence = _create_grounding_context(
+        client,
+        "Author Citation Project",
+        "A escrita acadêmica exige revisão contínua (Silva et al., 2022).",
+    )
+    reference = ProjectReference(
+        project_id=project_id,
+        title="Revisão da escrita acadêmica",
+        authors="Silva, Paula; Ramos, André",
+        journal="Escrita Científica",
+        year=2022,
+        doi="10.8888/escrita.2022",
+        qualis_score="A2",
+        availability="ABERTO",
+    )
+    db_session.add(reference)
+    db_session.commit()
+
+    citation = _detect_apparent_citation(sentence["text"])
+    assert citation == {
+        "raw": "(Silva et al., 2022)",
+        "doi": None,
+        "author": "Silva",
+        "year": 2022,
+    }
+    assert _reference_matches_citation({
+        "authors": reference.authors,
+        "year": reference.year,
+        "doi": reference.doi,
+    }, citation)
+    assert sentence["status"] == "UNVERIFIED"
+
+    search = client.post("/api/sentences/search/evidence", json={"sentence_id": sentence["id"]})
+    assert search.status_code == 200
+    match = next(item for item in search.json() if item["reference_id"] == reference.id)
+    assert match["status"] == "PENDING"
+    persisted_sentence = db_session.query(Sentence).filter(Sentence.id == sentence["id"]).one()
+    assert persisted_sentence.status == "UNVERIFIED"
