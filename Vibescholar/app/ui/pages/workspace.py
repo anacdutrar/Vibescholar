@@ -13,6 +13,8 @@ Full document editor with:
   • Settings button (opens settings dialog)
 """
 import json
+import base64
+import re
 from nicegui import ui
 from app.ui.components.layout import auth_guard, sidebar, page_header
 from app.ui.styles import GLOBAL_CSS
@@ -97,6 +99,38 @@ async def _read_upload_file(uploaded_file) -> tuple[str, bytes]:
     return uploaded_file.name, await uploaded_file.read()
 
 
+def _has_apparent_citation(text: str) -> bool:
+    return bool(
+        re.search(r"\([A-ZÀ-ÖØ-Ý][^)]{1,80},\s*(19|20)\d{2}\)", text, re.IGNORECASE)
+        or re.search(r"\[\d+(?:-\d+)?\]", text)
+        or re.search(r"\b10\.\d{4,9}/\S+", text)
+    )
+
+
+def _paragraph_key(sentence: dict) -> str:
+    paragraph_number = sentence.get("paragraph_number")
+    return "unidentified" if paragraph_number is None else str(paragraph_number)
+
+
+def _paragraph_filter_options(sentences: list[dict]) -> dict[str, str]:
+    numbers = sorted({
+        sentence.get("paragraph_number")
+        for sentence in sentences
+        if sentence.get("paragraph_number") is not None
+    })
+    options = {"all": "Todos os parágrafos"}
+    options.update({str(number): f"Parágrafo {number}" for number in numbers})
+    if any(sentence.get("paragraph_number") is None for sentence in sentences):
+        options["unidentified"] = "Sem parágrafo identificado"
+    return options
+
+
+def _filter_sentences_by_paragraph(sentences: list[dict], selected: str) -> list[dict]:
+    if selected == "all":
+        return list(sentences)
+    return [sentence for sentence in sentences if _paragraph_key(sentence) == selected]
+
+
 def _toolbar_row(doc: dict, refresh_fn) -> None:
     """Top action bar above the editor."""
     async def save_version_click():
@@ -121,8 +155,7 @@ def _toolbar_row(doc: dict, refresh_fn) -> None:
 
         ui.button("💾 Salvar Versão", on_click=save_version_click).classes("vs-btn").style("font-size:13px; padding:6px 14px !important;")
         ui.button("📤 Exportar", on_click=lambda: _open_export_dialog(doc)).classes("vs-btn-ghost").style("font-size:13px; padding:6px 14px !important;")
-        ui.button("📥 Importar", on_click=lambda: _open_import_dialog(refresh_fn)).classes("vs-btn-ghost").style("font-size:13px; padding:6px 14px !important;")
-        ui.button("⚙️ Configurações", on_click=lambda: _open_settings_dialog()).classes("vs-btn-ghost").style("font-size:13px; padding:6px 14px !important;")
+        ui.button("⚙️ Configurações", on_click=_open_settings_dialog).classes("vs-btn-ghost").style("font-size:13px; padding:6px 14px !important;")
 
 
 async def _save_version(doc: dict, refresh_fn) -> None:
@@ -150,10 +183,24 @@ def _open_export_dialog(doc: dict) -> None:
             ("🔤 ABNT (.txt)", "abnt"),
         ]
 
-        def do_export(fmt):
-            url = api.api_export_document_url(doc["id"], fmt)
-            ui.run_javascript(f"window.open('{url}', '_blank')")
-            dlg.close()
+        async def do_export(fmt):
+            try:
+                exported = await api.api_export_document_async(state.get_cookies(), doc["id"], fmt)
+                encoded = base64.b64encode(exported["content"]).decode("ascii")
+                filename = json.dumps(exported["filename"])
+                content_type = json.dumps(exported["content_type"])
+                ui.run_javascript(f"""
+                    const link = document.createElement('a');
+                    link.href = 'data:' + {content_type} + ';base64,{encoded}';
+                    link.download = {filename};
+                    document.body.appendChild(link);
+                    link.click();
+                    link.remove();
+                """)
+                ui.notify("Exporta??o iniciada.", type="positive")
+                dlg.close()
+            except Exception as e:
+                ui.notify(f"Erro ao exportar: {str(e)[:80]}", type="negative")
 
         with ui.grid(columns=2).style("gap:8px; width:100%;"):
             for label, fmt in formats:
@@ -245,7 +292,7 @@ def _open_import_dialog(refresh_fn) -> None:
     dlg.open()
 
 
-def _open_settings_dialog() -> None:
+async def _open_settings_dialog() -> None:
     project = state.get_current_project()
     if not project:
         ui.notify("Selecione um projeto primeiro.", type="warning")
@@ -253,25 +300,27 @@ def _open_settings_dialog() -> None:
 
     settings = {}
     try:
-        settings = api.api_get_project_settings(state.get_cookies(), project["id"])
-    except Exception:
-        pass
+        settings = await api.api_get_project_settings_async(state.get_cookies(), project["id"])
+    except Exception as e:
+        ui.notify(f"N?o foi poss?vel carregar configura??es: {str(e)[:80]}", type="negative")
 
     with ui.dialog() as dlg, ui.card().style(
         "background:#1a1d27; border:1px solid rgba(255,255,255,.08); border-radius:16px; padding:28px; min-width:480px;"
     ):
         ui.label("Configurações do Projeto").style("font-size:18px; font-weight:700; color:#f0f2ff; margin-bottom:20px;")
 
-        inp_lang = ui.select(["pt", "en", "es"], label="Idioma preferido", value=settings.get("preferred_language", "pt")).style("width:100%;")
+        inp_lang = ui.select(["pt", "en", "es"], label="Idioma principal das refer?ncias", value=settings.get("preferred_language", "pt")).style("width:100%;")
         inp_qualis = ui.select(["A1", "A2", "B1", "B2", "B3", "B4", "B5", "C"], label="Qualis mínimo", value=settings.get("minimum_qualis", "B1")).style("width:100%;")
         inp_year_min = ui.number("Ano mínimo de publicação", value=settings.get("publication_year_min"), min=1900, max=2030).style("width:100%;")
         inp_year_max = ui.number("Ano máximo de publicação", value=settings.get("publication_year_max"), min=1900, max=2030).style("width:100%;")
         inp_max_sug = ui.number("Máximo de sugestões", value=settings.get("max_suggestions", 5), min=1, max=20).style("width:100%;")
         inp_open_access = ui.checkbox("Somente acesso aberto", value=settings.get("only_open_access", False))
+        ui.label("Filtra artigos dispon?veis gratuitamente.").style("font-size:12px; color:#8b90a0; margin-top:-8px;")
         inp_prefer_doi = ui.checkbox("Preferir DOI", value=settings.get("prefer_doi", False))
+        ui.label("Prioriza refer?ncias que possuam identificador DOI.").style("font-size:12px; color:#8b90a0; margin-top:-8px;")
         lbl_s_err = ui.label("").style("color:#ef4444; font-size:13px;")
 
-        def save_settings():
+        async def save_settings():
             lbl_s_err.set_text("")
             payload = {
                 "preferred_language": inp_lang.value,
@@ -283,7 +332,7 @@ def _open_settings_dialog() -> None:
                 "prefer_doi": inp_prefer_doi.value,
             }
             try:
-                api.api_update_project_settings(state.get_cookies(), project["id"], payload)
+                await api.api_update_project_settings_async(state.get_cookies(), project["id"], payload)
                 ui.notify("✅ Configurações salvas!", type="positive")
                 dlg.close()
             except Exception as e:
@@ -328,7 +377,7 @@ async def _version_selector(doc: dict, refresh_fn) -> None:
                 def make_restore(v=ver):
                     async def restore():
                         try:
-                            api.api_restore_version(state.get_cookies(), doc["id"], v["id"])
+                            await api.api_restore_version_async(state.get_cookies(), doc["id"], v["id"])
                             ui.notify(f"✅ Versão {v['version_number']} restaurada!", type="positive")
                             await refresh_fn()
                         except Exception as e:
@@ -363,32 +412,87 @@ async def _right_panel(doc: dict, refresh_fn) -> None:
                     "font-size:13px; color:#8b90a0;"
                 )
             else:
-                for sent in sentences:
-                    status = sent.get("status", "UNVERIFIED")
-                    pill_cls = {"SUPPORTED": "pill-supported", "OUTDATED": "pill-outdated"}.get(status, "pill-unverified")
-                    pill_label = {"SUPPORTED": "✅ Fundamentada", "OUTDATED": "⚠️ Desatualizada"}.get(status, "🔍 Não verificada")
+                paragraph_filter = {"value": "all"}
+                options = _paragraph_filter_options(sentences)
 
-                    with ui.element("div").style(
-                        "background:#212435; border:1px solid rgba(255,255,255,.07); border-radius:8px; "
-                        "padding:12px 14px; margin-bottom:8px;"
-                    ):
-                        with ui.row().style("justify-content:space-between; align-items:flex-start; margin-bottom:8px; gap:8px;"):
-                            ui.label(sent["text"][:120] + ("…" if len(sent["text"]) > 120 else "")).style(
-                                "font-size:13px; color:#f0f2ff; flex:1; line-height:1.5;"
+                @ui.refreshable
+                def sentence_cards() -> None:
+                    visible_sentences = _filter_sentences_by_paragraph(
+                        sentences, paragraph_filter["value"]
+                    )
+                    count = len(visible_sentences)
+                    count_label = "sentença" if count == 1 else "sentenças"
+                    scope_label = "no documento" if paragraph_filter["value"] == "all" else "neste parágrafo"
+                    ui.label(f"{count} {count_label} {scope_label}").style(
+                        "font-size:12px; color:#8b90a0; margin-bottom:10px;"
+                    )
+
+                    for sent in visible_sentences:
+                        status = sent.get("status", "UNVERIFIED")
+                        pill_cls = {
+                            "SUPPORTED": "pill-supported",
+                            "OUTDATED": "pill-outdated",
+                        }.get(status, "pill-unverified")
+                        pill_label = {
+                            "SUPPORTED": "Fundamentada",
+                            "OUTDATED": "Desatualizada",
+                        }.get(status, "Não verificada")
+                        approved_count = int(sent.get("approved_evidence_count") or 0)
+                        approved_titles = sent.get("approved_reference_titles") or []
+
+                        with ui.element("div").style(
+                            "background:#212435; border:1px solid rgba(255,255,255,.07); border-radius:8px; "
+                            "padding:12px 14px; margin-bottom:8px;"
+                        ):
+                            with ui.row().style(
+                                "justify-content:space-between; align-items:flex-start; margin-bottom:8px; gap:8px;"
+                            ):
+                                ui.label(sent["text"][:120] + ("…" if len(sent["text"]) > 120 else "")).style(
+                                    "font-size:13px; color:#f0f2ff; flex:1; line-height:1.5;"
+                                )
+                                ui.element("span").classes(f"pill {pill_cls}").add_slot(
+                                    "default", f"<span>{pill_label}</span>"
+                                )
+
+                            if _has_apparent_citation(sent["text"]):
+                                ui.label("Citação detectada — verificação necessária").style(
+                                    "font-size:11px; color:#f59e0b; margin-bottom:6px;"
+                                )
+                            ui.label(f"{approved_count} evidência(s) aprovada(s)").style(
+                                "font-size:11px; color:#8b90a0;"
                             )
-                            ui.element("span").classes(f"pill {pill_cls}").add_slot(
-                                "default", f"<span>{pill_label}</span>"
+                            for title in approved_titles[:3]:
+                                ui.label(f"• {title[:80]}").style(
+                                    "font-size:11px; color:#b8bdcc; white-space:nowrap; "
+                                    "overflow:hidden; text-overflow:ellipsis; max-width:100%;"
+                                )
+
+                            def make_search(s=sent):
+                                async def search_ev():
+                                    await _evidence_panel(s, doc, refresh_fn)
+                                return search_ev
+
+                            action_label = (
+                                "Ver / adicionar evidências"
+                                if approved_count > 0
+                                else "Buscar evidências"
+                            )
+                            ui.button(action_label, on_click=make_search(sent)).style(
+                                "background:rgba(99,102,241,.12); border:1px solid rgba(99,102,241,.25); "
+                                "color:#818cf8; border-radius:6px; font-size:11px; padding:4px 12px; margin-top:8px;"
                             )
 
-                        def make_search(s=sent):
-                            def search_ev():
-                                _evidence_panel(s, doc, refresh_fn)
-                            return search_ev
+                def change_paragraph(event) -> None:
+                    paragraph_filter["value"] = event.value
+                    sentence_cards.refresh()
 
-                        ui.button("🔎 Buscar Evidências", on_click=make_search(sent)).style(
-                            "background:rgba(99,102,241,.12); border:1px solid rgba(99,102,241,.25); "
-                            "color:#6366f1; border-radius:6px; font-size:11px; padding:4px 12px;"
-                        )
+                ui.select(
+                    options=options,
+                    value=paragraph_filter["value"],
+                    label="Parágrafo",
+                    on_change=change_paragraph,
+                ).style("width:100%; margin-bottom:10px;")
+                sentence_cards()
 
         # ── Grounding dashboard ──────────────────────────────────────────────
         with ui.tab_panel(t_grounding):
@@ -429,49 +533,61 @@ async def _right_panel(doc: dict, refresh_fn) -> None:
             await _version_selector(doc, refresh_fn)
 
 
-def _evidence_panel(sentence: dict, doc: dict, refresh_fn) -> None:
+async def _evidence_panel(sentence: dict, doc: dict, refresh_fn) -> None:
     """Opens evidence suggestions dialog for a sentence."""
-    suggestions = []
-    try:
-        suggestions = api.api_search_evidence(state.get_cookies(), sentence["id"])
-    except Exception as e:
-        ui.notify(f"Erro ao buscar evidências: {str(e)[:80]}", type="negative")
-        return
-
     with ui.dialog() as dlg, ui.card().style(
         "background:#1a1d27; border:1px solid rgba(255,255,255,.08); border-radius:16px; "
         "padding:28px; min-width:600px; max-width:700px;"
     ):
-        ui.label("Sugestões de Evidência").style("font-size:18px; font-weight:700; color:#f0f2ff;")
-        ui.label(f'"{sentence["text"][:100]}…"').style(
+        ui.label("Sugest?es de Evid?ncia").style("font-size:18px; font-weight:700; color:#f0f2ff;")
+        ui.label(f'"{sentence["text"][:100]}?"').style(
             "font-size:13px; color:#8b90a0; margin-top:4px; margin-bottom:20px; font-style:italic;"
         )
 
-        if not suggestions:
-            ui.label("Nenhuma sugestão encontrada para esta sentença.").style("font-size:14px; color:#8b90a0;")
-        else:
-            ev_container = ui.column().style("gap:10px; width:100%;")
-            with ev_container:
-                _render_suggestions(suggestions, dlg, refresh_fn)
+        @ui.refreshable
+        async def evidence_content():
+            try:
+                suggestions = await api.api_search_evidence_async(state.get_cookies(), sentence["id"])
+            except Exception as e:
+                ui.label(f"Erro ao buscar evid?ncias: {str(e)[:80]}").style("font-size:13px; color:#ef4444;")
+                return
 
+            approved = [s for s in suggestions if s.get("status") == "APPROVED"]
+            pending = [s for s in suggestions if s.get("status", "PENDING") == "PENDING"]
+            rejected = [s for s in suggestions if s.get("status") == "REJECTED"]
+
+            if approved:
+                ui.label("Refer?ncias aprovadas").style("font-size:13px; font-weight:700; color:#22c55e;")
+                _render_suggestions(approved, refresh_fn, evidence_content.refresh)
+            if pending:
+                ui.label("Sugest?es pendentes").style("font-size:13px; font-weight:700; color:#f0f2ff; margin-top:10px;")
+                _render_suggestions(pending, refresh_fn, evidence_content.refresh)
+            if not pending:
+                ui.button("Buscar mais sugest?es", on_click=evidence_content.refresh).classes("vs-btn-ghost").style("margin-top:8px;")
+            if not suggestions:
+                ui.label("Nenhuma sugest?o encontrada para esta senten?a.").style("font-size:14px; color:#8b90a0;")
+            if rejected:
+                ui.label(f"{len(rejected)} sugest?o(?es) rejeitada(s).").style("font-size:12px; color:#8b90a0; margin-top:8px;")
+
+        await evidence_content()
         ui.button("Fechar", on_click=dlg.close).classes("vs-btn-ghost").style("width:100%; margin-top:16px;")
     dlg.open()
 
 
-def _render_suggestions(suggestions: list, dlg, refresh_fn) -> None:
+def _render_suggestions(suggestions: list, refresh_fn, evidence_refresh_fn) -> None:
     for sug in suggestions:
         ref = sug.get("reference", {})
         status = sug.get("status", "PENDING")
         status_colors = {"APPROVED": "#22c55e", "REJECTED": "#ef4444", "PENDING": "#f59e0b"}
-        status_labels = {"APPROVED": "✅ Aprovada", "REJECTED": "❌ Rejeitada", "PENDING": "⏳ Pendente"}
+        status_labels = {"APPROVED": "Aprovada", "REJECTED": "Rejeitada", "PENDING": "Pendente"}
         color = status_colors.get(status, "#f59e0b")
 
         with ui.element("div").style(
-            f"background:#212435; border:1px solid rgba(255,255,255,.07); border-radius:10px; padding:16px;"
+            "background:#212435; border:1px solid rgba(255,255,255,.07); border-radius:10px; padding:16px;"
         ):
             with ui.row().style("justify-content:space-between; align-items:flex-start; gap:12px;"):
                 with ui.column().style("flex:1; gap:4px; min-width:0;"):
-                    ui.label(ref.get("title", "Sem título")).style("font-size:14px; font-weight:700; color:#f0f2ff;")
+                    ui.label(ref.get("title", "Sem t?tulo")).style("font-size:14px; font-weight:700; color:#f0f2ff;")
                     ui.label(ref.get("authors", "")).style("font-size:12px; color:#8b90a0;")
                     with ui.row().style("gap:6px; flex-wrap:wrap; margin-top:4px;"):
                         if ref.get("journal"):
@@ -483,7 +599,7 @@ def _render_suggestions(suggestions: list, dlg, refresh_fn) -> None:
                                 "default", f"<span>{ref['year']}</span>"
                             )
                         if ref.get("qualis_score"):
-                            ui.element("span").classes("vs-chip").style(f"font-size:11px; background:rgba(34,197,94,.1); color:#22c55e;").add_slot(
+                            ui.element("span").classes("vs-chip").style("font-size:11px; background:rgba(34,197,94,.1); color:#22c55e;").add_slot(
                                 "default", f"<span>Qualis {ref['qualis_score']}</span>"
                             )
                 ui.element("span").classes("pill").style(f"color:{color}; border-color:{color}55;").add_slot(
@@ -492,37 +608,31 @@ def _render_suggestions(suggestions: list, dlg, refresh_fn) -> None:
 
             if status == "PENDING":
                 with ui.row().style("gap:8px; margin-top:12px;"):
-                    def make_approve(sid=sug["id"]):
-                        async def approve():
-                            try:
-                                api.api_update_suggestion_status(state.get_cookies(), sid, "APPROVED")
-                                ui.notify("✅ Evidência aprovada!", type="positive")
-                                dlg.close()
-                                await refresh_fn()
-                            except Exception as e:
-                                ui.notify(f"Erro: {str(e)[:60]}", type="negative")
-                        return approve
+                    async def approve(sid=sug["id"]):
+                        try:
+                            await api.api_update_suggestion_status_async(state.get_cookies(), sid, "APPROVED")
+                            ui.notify("Evid?ncia aprovada!", type="positive")
+                            await evidence_refresh_fn()
+                            await refresh_fn()
+                        except Exception as e:
+                            ui.notify(f"Erro: {str(e)[:60]}", type="negative")
 
-                    def make_reject(sid=sug["id"]):
-                        async def reject():
-                            try:
-                                api.api_update_suggestion_status(state.get_cookies(), sid, "REJECTED")
-                                ui.notify("Evidência rejeitada.", type="info")
-                                dlg.close()
-                                await refresh_fn()
-                            except Exception as e:
-                                ui.notify(f"Erro: {str(e)[:60]}", type="negative")
-                        return reject
+                    async def reject(sid=sug["id"]):
+                        try:
+                            await api.api_update_suggestion_status_async(state.get_cookies(), sid, "REJECTED")
+                            ui.notify("Evid?ncia rejeitada.", type="info")
+                            await evidence_refresh_fn()
+                        except Exception as e:
+                            ui.notify(f"Erro: {str(e)[:60]}", type="negative")
 
-                    ui.button("✅ Aprovar", on_click=make_approve(sug["id"])).style(
+                    ui.button("Aprovar", on_click=approve).style(
                         "background:#16a34a22; border:1px solid #22c55e55; color:#22c55e; "
                         "border-radius:6px; font-size:12px; padding:6px 14px;"
                     )
-                    ui.button("❌ Rejeitar", on_click=make_reject(sug["id"])).style(
+                    ui.button("Rejeitar", on_click=reject).style(
                         "background:#7f1d1d22; border:1px solid #ef444455; color:#ef4444; "
                         "border-radius:6px; font-size:12px; padding:6px 14px;"
                     )
-
 
 def _document_selector(refresh_fn, docs: list[dict]) -> None:
     """Document selector dropdown in the toolbar area."""
@@ -606,7 +716,6 @@ async def workspace_page() -> None:
                     ui.label("Selecione ou crie um documento no Dashboard.").style("font-size:13px; color:#8b90a0; margin-bottom:20px;")
                     with ui.row().style("gap:10px; justify-content:center;"):
                         ui.button("📂 Dashboard", on_click=lambda: ui.navigate.to("/dashboard")).classes("vs-btn")
-                        ui.button("📥 Importar", on_click=lambda: _open_import_dialog(refresh)).classes("vs-btn-ghost")
                 return
 
             # ── Toolbar ────────────────────────────────────────────────────
@@ -630,8 +739,7 @@ async def workspace_page() -> None:
 
                 ui.button("💾 Versão", on_click=save_version_click).classes("vs-btn").style("font-size:13px; padding:6px 14px !important;")
                 ui.button("📤 Exportar", on_click=lambda: _open_export_dialog(doc)).classes("vs-btn-ghost").style("font-size:13px; padding:6px 14px !important;")
-                ui.button("📥 Importar", on_click=lambda: _open_import_dialog(refresh)).classes("vs-btn-ghost").style("font-size:13px; padding:6px 14px !important;")
-                ui.button("⚙️ Config", on_click=lambda: _open_settings_dialog()).classes("vs-btn-ghost").style("font-size:13px; padding:6px 14px !important;")
+                ui.button("⚙️ Config", on_click=_open_settings_dialog).classes("vs-btn-ghost").style("font-size:13px; padding:6px 14px !important;")
 
             # ── Editor + Right panel ───────────────────────────────────────
             with ui.row().style("gap:20px; align-items:flex-start; width:100%;"):

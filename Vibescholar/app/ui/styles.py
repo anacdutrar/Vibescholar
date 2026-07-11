@@ -121,6 +121,26 @@ body, .nicegui-content { background: var(--bg-base) !important; color: var(--tex
 .q-field--outlined .q-field__control:before { border-color: var(--border) !important; }
 .q-field--outlined.q-field--focused .q-field__control:before { border-color: var(--accent) !important; }
 .q-field__label { color: var(--text-muted) !important; }
+.q-menu,
+.q-select__dialog,
+.q-virtual-scroll__content {
+  background: var(--bg-card2) !important;
+  color: var(--text-primary) !important;
+}
+.q-item,
+.q-item__label {
+  color: var(--text-primary) !important;
+}
+.q-item:hover,
+.q-item.q-manual-focusable--focused,
+.q-item--active {
+  background: rgba(99,102,241,.18) !important;
+  color: var(--text-primary) !important;
+}
+.q-field--focused .q-field__native,
+.q-field--focused .q-field__input {
+  color: var(--text-primary) !important;
+}
 
 /* ── Score Badge ── */
 .vs-score-ring {

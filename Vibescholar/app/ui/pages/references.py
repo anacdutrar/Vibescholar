@@ -45,7 +45,7 @@ def _build_payload(fields: dict) -> dict:
     }
 
 
-def references_page() -> None:
+async def references_page() -> None:
     if not auth_guard():
         return
 
@@ -67,14 +67,15 @@ def references_page() -> None:
 
         refs = []
         try:
-            refs = api.api_list_references(state.get_cookies(), project["id"])
-        except Exception:
-            pass
+            refs = await api.api_list_references_async(state.get_cookies(), project["id"])
+        except Exception as e:
+            ui.notify(f"N?o foi poss?vel carregar refer?ncias: {str(e)[:80]}", type="negative")
 
-        def refresh():
+        async def refresh():
             ui.navigate.to("/references")
 
         # ── Action bar ──────────────────────────────────────────────────────
+        ui.label("A biblioteca re?ne as fontes do projeto e alimenta as sugest?es de evid?ncia.").style("font-size:13px; color:#8b90a0; margin-bottom:12px;")
         with ui.row().style("align-items:center; gap:10px; margin-bottom:20px; flex-wrap:wrap;"):
             ui.label(f"{len(refs)} referências").style("font-size:14px; color:#8b90a0; flex:1;")
 
@@ -84,29 +85,29 @@ def references_page() -> None:
             ):
                 ui.label("Importar Referências").style("font-size:18px; font-weight:700; color:#f0f2ff; margin-bottom:4px;")
                 ui.label("Formatos: .bib · .csv · .json").style("font-size:13px; color:#8b90a0; margin-bottom:16px;")
-                upload = ui.upload(label="Selecionar arquivo", auto_upload=True).style("width:100%;")
+                upload = ui.upload(label="Selecionar arquivo", auto_upload=True, multiple=False, max_files=1).style("width:100%;")
                 lbl_imp_err = ui.label("").style("color:#ef4444; font-size:13px;")
                 file_data = {"name": None, "content": None}
 
-                def handle_upload(e):
-                    file_data["name"] = e.name
-                    file_data["content"] = e.content.read()
+                async def handle_upload(e):
+                    file_data["name"] = e.file.name
+                    file_data["content"] = await e.file.read()
 
                 upload.on_upload(handle_upload)
 
-                def do_import():
+                async def do_import():
                     lbl_imp_err.set_text("")
                     if not file_data["content"]:
                         lbl_imp_err.set_text("Selecione um arquivo.")
                         return
                     try:
-                        imported = api.api_import_references(
+                        imported = await api.api_import_references_async(
                             state.get_cookies(), project["id"],
                             file_data["name"], file_data["content"]
                         )
                         dlg_import.close()
                         ui.notify(f"✅ {len(imported)} referências importadas!", type="positive")
-                        refresh()
+                        await refresh()
                     except Exception as e:
                         lbl_imp_err.set_text(f"Erro: {str(e)[:100]}")
 
@@ -124,17 +125,17 @@ def references_page() -> None:
                 fields = _ref_form_fields()
                 lbl_new_err = ui.label("").style("color:#ef4444; font-size:13px;")
 
-                def create_ref():
+                async def create_ref():
                     lbl_new_err.set_text("")
                     payload = _build_payload(fields)
                     if not payload["title"] or not payload["authors"]:
                         lbl_new_err.set_text("Título e autores são obrigatórios.")
                         return
                     try:
-                        api.api_create_reference(state.get_cookies(), project["id"], payload)
+                        await api.api_create_reference_async(state.get_cookies(), project["id"], payload)
                         dlg_new.close()
                         ui.notify("✅ Referência criada!", type="positive")
-                        refresh()
+                        await refresh()
                     except Exception as e:
                         lbl_new_err.set_text(f"Erro: {str(e)[:80]}")
 
@@ -208,17 +209,17 @@ def references_page() -> None:
                 ef["availability"].value = ref_data.get("availability","FECHADO")
                 lbl_edit_err = ui.label("").style("color:#ef4444; font-size:13px;")
 
-                def save_edit():
+                async def save_edit():
                     lbl_edit_err.set_text("")
                     payload = _build_payload(ef)
                     if not payload["title"] or not payload["authors"]:
                         lbl_edit_err.set_text("Título e autores são obrigatórios.")
                         return
                     try:
-                        api.api_update_reference(state.get_cookies(), ref_id, payload)
+                        await api.api_update_reference_async(state.get_cookies(), ref_id, payload)
                         dlg_edit.close()
                         ui.notify("✅ Referência atualizada!", type="positive")
-                        refresh()
+                        await refresh()
                     except Exception as e:
                         lbl_edit_err.set_text(f"Erro: {str(e)[:80]}")
 
@@ -239,12 +240,12 @@ def references_page() -> None:
                 ui.label(f'Tem certeza que deseja remover "{title[:60]}"?').style("font-size:13px; color:#8b90a0; margin:12px 0;")
                 with ui.row().style("gap:8px;"):
                     ui.button("Cancelar", on_click=dlg_del.close).classes("vs-btn-ghost")
-                    def confirm_del():
+                    async def confirm_del():
                         try:
-                            api.api_delete_reference(state.get_cookies(), ref_id)
+                            await api.api_delete_reference_async(state.get_cookies(), ref_id)
                             dlg_del.close()
                             ui.notify("Referência removida.", type="info")
-                            refresh()
+                            await refresh()
                         except Exception as ex:
                             ui.notify(f"Erro: {str(ex)[:60]}", type="negative")
                     ui.button("Remover", on_click=confirm_del).classes("vs-btn-danger")

@@ -1,8 +1,9 @@
+import inspect
 import pytest
 import httpx
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
-from sqlalchemy.exc import PendingRollbackError
+from sqlalchemy.exc import IntegrityError, PendingRollbackError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from app.core.database import Base, get_db
@@ -10,8 +11,13 @@ from app.app import fastapi_app
 from app.core.security import hash_password
 from app.models.user import User
 from app.models.document import DocumentVersion, Sentence
+from app.models.project_settings import ProjectSettings
+from app.models.reference import EvidenceSuggestion, ProjectReference
+from app.repositories.reference_repository import ReferenceRepository
 from app.schemas.request import UserCreate
 from app.ui import api_client
+from app.ui.pages import dashboard
+from app.ui.pages.workspace import _filter_sentences_by_paragraph, _paragraph_filter_options
 from app.utils.text_normalizer import normalize_text
 
 # StaticPool forces ALL connections to reuse the same single in-memory connection.
@@ -318,3 +324,155 @@ def test_document_import_and_export(client):
     export_res = client.get(f"/api/documents/{doc_id}/export/markdown")
     assert export_res.status_code == 200
     assert b"Primeira frase do documento importado" in export_res.content
+
+
+def _create_grounding_context(client, project_name="Grounding Project"):
+    client.post("/api/auth/login", json={
+        "username": "testuser",
+        "password": "testpass123",
+    })
+    project_res = client.post("/api/projects", json={"name": project_name})
+    assert project_res.status_code == 201
+    project_id = project_res.json()["id"]
+    document_res = client.post(f"/api/projects/{project_id}/documents", json={
+        "title": "Documento de evidências",
+        "content": "A inteligência artificial melhora a recuperação de informação científica.",
+    })
+    assert document_res.status_code == 201
+    document_id = document_res.json()["id"]
+    sentences_res = client.get(f"/api/documents/{document_id}/sentences")
+    assert sentences_res.status_code == 200
+    sentence = sentences_res.json()[0]
+    return project_id, document_id, sentence
+
+
+def test_project_delete_dialog_is_persistent_and_refreshes_once():
+    page_source = inspect.getsource(dashboard.dashboard_page)
+    selector_source = inspect.getsource(dashboard._project_selector)
+    confirm_source = page_source.split("async def confirm_project_delete", 1)[1].split(
+        "def open_project_delete_dialog", 1
+    )[0]
+    after_refresh = confirm_source.split("await dashboard_content.refresh()", 1)[1]
+
+    assert "with ui.dialog() as project_delete_dialog" in page_source
+    assert "with ui.dialog() as dlg_del" not in selector_source
+    assert "onclick=event.stopPropagation()" in selector_source
+    assert confirm_source.count("await dashboard_content.refresh()") == 1
+    assert ".close()" not in after_refresh
+    assert ".enable()" not in after_refresh
+    assert ".disable()" not in after_refresh
+    assert ".set_text()" not in after_refresh
+
+
+def test_mock_evidence_uses_persisted_references_without_duplicates(client, db_session):
+    _, document_id, sentence = _create_grounding_context(client)
+
+    first = client.post("/api/sentences/search/evidence", json={"sentence_id": sentence["id"]})
+    assert first.status_code == 200
+    first_suggestions = first.json()
+    assert 3 <= len(first_suggestions) <= 5
+    assert db_session.query(ProjectReference).filter(ProjectReference.project_id.is_(None)).count() >= 12
+    assert all(item["reference_id"] is not None for item in first_suggestions)
+    assert all(item["reference_id"] > 0 for item in first_suggestions)
+    assert all(
+        db_session.query(ProjectReference).filter(ProjectReference.id == item["reference_id"]).first()
+        for item in first_suggestions
+    )
+
+    suggestion_count = db_session.query(EvidenceSuggestion).count()
+    second = client.post("/api/sentences/search/evidence", json={"sentence_id": sentence["id"]})
+    assert second.status_code == 200
+    assert db_session.query(EvidenceSuggestion).count() == suggestion_count
+    assert {item["id"] for item in second.json()} == {item["id"] for item in first_suggestions}
+
+    rejected = first_suggestions[0]
+    reject_res = client.put(
+        f"/api/evidence-suggestions/{rejected['id']}", json={"status": "REJECTED"}
+    )
+    assert reject_res.status_code == 200
+    after_reject = client.post("/api/sentences/search/evidence", json={"sentence_id": sentence["id"]})
+    assert after_reject.status_code == 200
+    assert all(
+        item["reference_id"] != rejected["reference_id"] or item["status"] != "PENDING"
+        for item in after_reject.json()
+    )
+
+    approved = next(item for item in after_reject.json() if item["status"] == "PENDING")
+    approve_res = client.put(
+        f"/api/evidence-suggestions/{approved['id']}", json={"status": "APPROVED"}
+    )
+    assert approve_res.status_code == 200
+    after_approve = client.post("/api/sentences/search/evidence", json={"sentence_id": sentence["id"]})
+    approved_rows = [
+        item for item in after_approve.json()
+        if item["reference_id"] == approved["reference_id"]
+    ]
+    assert len(approved_rows) == 1
+    assert approved_rows[0]["status"] == "APPROVED"
+
+    sentence_list = client.get(f"/api/documents/{document_id}/sentences").json()
+    assert sentence_list[0]["approved_evidence_count"] == 1
+    assert sentence_list[0]["approved_reference_titles"] == [approved["reference"]["title"]]
+
+
+def test_mock_evidence_not_found_and_filters_without_results(client, db_session):
+    client.post("/api/auth/login", json={
+        "username": "testuser",
+        "password": "testpass123",
+    })
+    missing = client.post("/api/sentences/search/evidence", json={"sentence_id": 999999})
+    assert missing.status_code == 404
+
+    project_id, _, sentence = _create_grounding_context(client, "Filtered Project")
+    project_settings = db_session.query(ProjectSettings).filter(
+        ProjectSettings.project_id == project_id
+    ).one()
+    project_settings.minimum_qualis = "A1"
+    project_settings.publication_year_min = 2099
+    project_settings.publication_year_max = 2100
+    project_settings.only_open_access = True
+    project_settings.prefer_doi = True
+    project_settings.max_suggestions = 5
+    db_session.commit()
+
+    filtered = client.post("/api/sentences/search/evidence", json={"sentence_id": sentence["id"]})
+    assert filtered.status_code == 200
+    assert filtered.json() == []
+
+
+def test_suggestion_integrity_failure_rolls_back_session(client, db_session):
+    _, _, sentence = _create_grounding_context(client, "Rollback Project")
+    invalid = EvidenceSuggestion(
+        document_version_id=sentence["document_version_id"],
+        sentence_uuid=sentence["sentence_uuid"],
+        reference_id=-999,
+        status="PENDING",
+    )
+
+    with pytest.raises(IntegrityError):
+        ReferenceRepository.create_suggestion(db_session, invalid)
+
+    try:
+        assert db_session.query(User).filter(User.username == "testuser").first() is not None
+    except PendingRollbackError as exc:
+        pytest.fail(f"Session entered PendingRollbackError after suggestion failure: {exc}")
+
+
+def test_sentence_paragraph_filter_is_local_and_handles_unidentified():
+    sentences = [
+        {"id": 1, "paragraph_number": 1, "text": "Primeira."},
+        {"id": 2, "paragraph_number": 1, "text": "Segunda."},
+        {"id": 3, "paragraph_number": 2, "text": "Terceira."},
+        {"id": 4, "paragraph_number": None, "text": "Sem posição."},
+    ]
+
+    assert _paragraph_filter_options(sentences) == {
+        "all": "Todos os parágrafos",
+        "1": "Parágrafo 1",
+        "2": "Parágrafo 2",
+        "unidentified": "Sem parágrafo identificado",
+    }
+    assert [item["id"] for item in _filter_sentences_by_paragraph(sentences, "1")] == [1, 2]
+    assert [item["id"] for item in _filter_sentences_by_paragraph(sentences, "2")] == [3]
+    assert [item["id"] for item in _filter_sentences_by_paragraph(sentences, "unidentified")] == [4]
+    assert len(_filter_sentences_by_paragraph(sentences, "all")) == 4

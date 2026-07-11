@@ -10,7 +10,7 @@ class ExportService:
         """
         Exports the document and its references as a unified Markdown string.
         """
-        markdown = f"# {title}\n\n{content}\n\n"
+        markdown = f"{content}\n\n"
         if references:
             markdown += "## Referências Bibliográficas\n\n"
             for ref in references:
@@ -23,7 +23,6 @@ class ExportService:
         Generates a DOCX file containing the document content and bibliography.
         """
         doc = docx.Document()
-        doc.add_heading(title, 0)
 
         # Content parsing
         for block in content.split("\n\n"):
@@ -63,11 +62,6 @@ class ExportService:
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Helvetica", size=12)
-
-        # Render Title
-        pdf.set_font("Helvetica", style="B", size=16)
-        pdf.cell(0, 10, txt=title, ln=1, align="C")
-        pdf.ln(8)
 
         # Render Body Paragraphs
         pdf.set_font("Helvetica", size=11)
@@ -110,8 +104,8 @@ class ExportService:
                 pdf.multi_cell(0, 6, txt=f"- {clean_ref}")
                 pdf.ln(1)
 
-        # Output bytes
-        return pdf.output()
+        # fpdf2 may return bytearray depending on version; normalize for StreamingResponse.
+        return bytes(pdf.output())
 
     @staticmethod
     def export_bibtex(references: List[ProjectReference]) -> str:

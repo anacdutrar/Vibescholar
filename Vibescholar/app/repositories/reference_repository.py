@@ -1,9 +1,11 @@
-from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import func, or_
+from sqlalchemy.exc import IntegrityError
 from typing import List, Optional
 from datetime import datetime
 from app.models.reference import ProjectReference, EvidenceSuggestion
 from app.schemas.request import ReferenceCreate
+from app.core.logging import logger
 
 class ReferenceRepository:
     # --- REFERENCE CRUD ---
@@ -23,11 +25,61 @@ class ReferenceRepository:
                 or_(ProjectReference.project_id == project_id, ProjectReference.project_id.is_(None)),
                 ProjectReference.deleted_at.is_(None)
             ).all()
-        else:
-            return db.query(ProjectReference).filter(
-                ProjectReference.project_id.is_(None),
-                ProjectReference.deleted_at.is_(None)
-            ).all()
+        return db.query(ProjectReference).filter(
+            ProjectReference.project_id.is_(None),
+            ProjectReference.deleted_at.is_(None)
+        ).all()
+
+    @staticmethod
+    def find_active_by_doi_or_title_year(
+        db: Session,
+        doi: Optional[str],
+        title: str,
+        year: Optional[int],
+    ) -> Optional[ProjectReference]:
+        query = db.query(ProjectReference).filter(
+            ProjectReference.project_id.is_(None),
+            ProjectReference.deleted_at.is_(None),
+        )
+        if doi:
+            found = query.filter(func.lower(ProjectReference.doi) == doi.strip().lower()).first()
+            if found:
+                return found
+        return query.filter(
+            func.lower(ProjectReference.title) == title.strip().lower(),
+            ProjectReference.year == year,
+        ).first()
+
+    @staticmethod
+    def ensure_global_references(
+        db: Session,
+        payloads: list[dict],
+    ) -> tuple[List[ProjectReference], list[int], list[int]]:
+        references: List[ProjectReference] = []
+        found_ids: list[int] = []
+        created: List[ProjectReference] = []
+        try:
+            for payload in payloads:
+                reference = ReferenceRepository.find_active_by_doi_or_title_year(
+                    db,
+                    payload.get("doi"),
+                    payload["title"],
+                    payload.get("year"),
+                )
+                if reference:
+                    found_ids.append(reference.id)
+                else:
+                    reference = ProjectReference(project_id=None, **payload)
+                    db.add(reference)
+                    db.flush()
+                    created.append(reference)
+                references.append(reference)
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            logger.exception("reference.mock.ensure rollback count=%s", len(payloads))
+            raise
+        return references, found_ids, [reference.id for reference in created]
 
     @staticmethod
     def create(db: Session, ref_in: ReferenceCreate, project_id: Optional[int] = None) -> ProjectReference:
@@ -75,8 +127,17 @@ class ReferenceRepository:
 
     @staticmethod
     def get_suggestions_by_version(db: Session, version_id: int) -> List[EvidenceSuggestion]:
-        return db.query(EvidenceSuggestion).filter(
+        return db.query(EvidenceSuggestion).options(joinedload(EvidenceSuggestion.reference)).filter(
             EvidenceSuggestion.document_version_id == version_id
+        ).all()
+
+    @staticmethod
+    def get_suggestions_by_version_and_sentence(
+        db: Session, version_id: int, sentence_uuid: str
+    ) -> List[EvidenceSuggestion]:
+        return db.query(EvidenceSuggestion).options(joinedload(EvidenceSuggestion.reference)).filter(
+            EvidenceSuggestion.document_version_id == version_id,
+            EvidenceSuggestion.sentence_uuid == sentence_uuid,
         ).all()
 
     @staticmethod
@@ -91,15 +152,30 @@ class ReferenceRepository:
 
     @staticmethod
     def create_suggestion(db: Session, suggestion: EvidenceSuggestion) -> EvidenceSuggestion:
-        db.add(suggestion)
-        db.commit()
-        db.refresh(suggestion)
-        return suggestion
+        try:
+            db.add(suggestion)
+            db.commit()
+            db.refresh(suggestion)
+            return suggestion
+        except IntegrityError:
+            db.rollback()
+            logger.exception(
+                "evidence.suggestion.create rollback version_id=%s sentence_uuid=%s reference_id=%s",
+                suggestion.document_version_id,
+                suggestion.sentence_uuid,
+                suggestion.reference_id,
+            )
+            raise
 
     @staticmethod
     def bulk_create_suggestions(db: Session, suggestions: List[EvidenceSuggestion]):
-        db.add_all(suggestions)
-        db.commit()
+        try:
+            db.add_all(suggestions)
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            logger.exception("evidence.suggestion.bulk_create rollback count=%s", len(suggestions))
+            raise
 
     @staticmethod
     def update_suggestion_status(db: Session, suggestion: EvidenceSuggestion, status: str) -> EvidenceSuggestion:

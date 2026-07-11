@@ -69,9 +69,9 @@ async def page_workspace():
 
 
 @ui.page("/references")
-def page_references():
+async def page_references():
     from app.ui.pages.references import references_page
-    references_page()
+    await references_page()
 
 
 # ─── NiceGUI ↔ FastAPI binding ───────────────────────────────────────────────

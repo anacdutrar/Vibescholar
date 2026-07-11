@@ -23,6 +23,10 @@ def _score_color(score: float) -> str:
 _dashboard_refresh_count = 0
 
 
+async def _read_upload_file(uploaded_file) -> tuple[str, bytes]:
+    return uploaded_file.name, await uploaded_file.read()
+
+
 def _select_valid_current_project(projects: list[dict]) -> dict:
     current = state.get_current_project()
     current_id = current.get("id") if current else None
@@ -39,7 +43,7 @@ def _select_valid_current_project(projects: list[dict]) -> dict:
     return {}
 
 
-def _project_selector(projects: list[dict], refresh_fn) -> None:
+def _project_selector(projects: list[dict], refresh_fn, open_delete_dialog) -> None:
     current = state.get_current_project()
     current_id = current.get("id") if current else None
 
@@ -60,6 +64,7 @@ def _project_selector(projects: list[dict], refresh_fn) -> None:
 
                 async def create_project():
                     start = time.perf_counter()
+                    refresh_started = False
                     logger.info("project.create callback start elapsed=%.4f", 0.0)
                     if create_project_running["value"]:
                         logger.warning("project.create duplicate callback ignored elapsed=%.4f", time.perf_counter() - start)
@@ -85,6 +90,8 @@ def _project_selector(projects: list[dict], refresh_fn) -> None:
                         logger.info("project.create after state update elapsed=%.4f", time.perf_counter() - start)
                         dlg_new_proj.close()
                         logger.info("project.create before visual refresh elapsed=%.4f", time.perf_counter() - start)
+                        create_project_running["value"] = False
+                        refresh_started = True
                         await refresh_fn()
                         logger.info("project.create after visual refresh elapsed=%.4f", time.perf_counter() - start)
                     except httpx.HTTPStatusError as e:
@@ -106,7 +113,8 @@ def _project_selector(projects: list[dict], refresh_fn) -> None:
                         lbl_err.set_text(f"Erro: {str(e)[:80]}")
                         ui.notify("N?o foi poss?vel criar o projeto.", type="negative")
                     finally:
-                        btn_create_project.enable()
+                        if not refresh_started:
+                            btn_create_project.enable()
                         create_project_running["value"] = False
                         logger.info("project.create callback end elapsed=%.4f", time.perf_counter() - start)
 
@@ -163,6 +171,13 @@ def _project_selector(projects: list[dict], refresh_fn) -> None:
 
                     card.on("click", make_select(proj))
 
+                    def make_delete(p=proj):
+                        def open_delete():
+                            open_delete_dialog(p)
+                        return open_delete
+
+                    ui.button("Excluir projeto", on_click=make_delete(proj)).props("onclick=event.stopPropagation()").classes("vs-btn-danger").style("font-size:12px; padding:4px 10px !important;")
+
 
 def _document_list(refresh_fn, docs: list[dict] | None = None) -> None:
     project = state.get_current_project()
@@ -212,6 +227,74 @@ def _document_list(refresh_fn, docs: list[dict] | None = None) -> None:
 
             with ui.row().style("gap:8px;"):
                 ui.button("+ Novo", on_click=dlg_new_doc.open).classes("vs-btn").style("font-size:13px; padding:6px 14px !important;")
+                with ui.dialog() as dlg_import_doc, ui.card().style(
+                    "background:#1a1d27; border:1px solid rgba(255,255,255,.08); border-radius:16px; padding:28px; min-width:420px;"
+                ):
+                    ui.label("Importar documento").style("font-size:18px; font-weight:700; color:#f0f2ff; margin-bottom:4px;")
+                    ui.label("Formatos suportados: .docx · .md · .txt").style("font-size:13px; color:#8b90a0; margin-bottom:20px;")
+                    inp_imp_title = ui.input("Título do documento").style("width:100%;")
+                    upload = ui.upload(
+                        label="Selecionar arquivo",
+                        auto_upload=True,
+                        multiple=False,
+                        max_files=1,
+                        max_file_size=20_000_000,
+                        on_rejected=lambda: lbl_imp_err.set_text("Arquivo inválido. Use .docx, .md ou .txt."),
+                    ).props('accept=".docx,.md,.txt"').classes("vs-upload-dark").style("width:100%; margin-top:12px;")
+                    selected_file_label = ui.label("Nenhum arquivo selecionado").style("color:#8b90a0; font-size:12px;")
+                    lbl_imp_err = ui.label("").style("color:#ef4444; font-size:13px;")
+                    file_data = {"name": None, "content": None}
+
+                    async def handle_upload(e):
+                        filename = e.file.name
+                        if not filename.lower().endswith((".docx", ".md", ".txt")):
+                            file_data["name"] = None
+                            file_data["content"] = None
+                            selected_file_label.set_text("Nenhum arquivo selecionado")
+                            lbl_imp_err.set_text("Arquivo inválido. Use .docx, .md ou .txt.")
+                            upload.reset()
+                            return
+                        try:
+                            filename, content = await _read_upload_file(e.file)
+                        except Exception as exc:
+                            logger.exception("dashboard.document.import upload read failed")
+                            lbl_imp_err.set_text(f"Erro ao ler arquivo: {str(exc)[:80]}")
+                            return
+                        file_data["name"] = filename
+                        file_data["content"] = content
+                        selected_file_label.set_text(f"{filename} ({len(content)} bytes)")
+                        lbl_imp_err.set_text("")
+                        upload.reset()
+
+                    upload.on_upload(handle_upload)
+
+                    async def do_import():
+                        lbl_imp_err.set_text("")
+                        title = (inp_imp_title.value or "").strip()
+                        if not title:
+                            lbl_imp_err.set_text("Título é obrigatório.")
+                            return
+                        if not file_data["content"]:
+                            lbl_imp_err.set_text("Selecione um arquivo.")
+                            return
+                        try:
+                            doc = await api.api_import_document_async(
+                                state.get_cookies(), project["id"], title,
+                                file_data["name"], file_data["content"]
+                            )
+                            state.set_current_document(doc)
+                            dlg_import_doc.close()
+                            ui.notify("Documento importado com sucesso.", type="positive")
+                            await refresh_fn()
+                        except Exception as e:
+                            logger.exception("dashboard.document.import failed")
+                            lbl_imp_err.set_text(f"Erro: {str(e)[:100]}")
+
+                    with ui.row().style("gap:8px; margin-top:16px;"):
+                        ui.button("Cancelar", on_click=dlg_import_doc.close).classes("vs-btn-ghost")
+                        ui.button("Importar documento", on_click=do_import).classes("vs-btn")
+
+                ui.button("Importar documento", on_click=dlg_import_doc.open).classes("vs-btn-ghost").style("font-size:13px; padding:6px 14px !important;")
                 ui.button("Abrir Editor", on_click=lambda: ui.navigate.to("/workspace")).classes("vs-btn-ghost").style("font-size:13px; padding:6px 14px !important;")
 
         if not docs:
@@ -232,9 +315,9 @@ def _document_list(refresh_fn, docs: list[dict] | None = None) -> None:
 
             with ui.element("div").style(
                 f"background:#1a1d27; border:1px solid rgba(255,255,255,.08); {border} "
-                f"border-radius:12px; padding:18px 20px; cursor:pointer; transition:all .2s;"
+                f"border-radius:12px; padding:18px 20px; transition:all .2s;"
                 "display:flex; align-items:center; gap:16px;"
-            ) as row_card:
+            ):
                 # Score ring
                 ui.element("div").style(
                     f"width:52px;height:52px;border-radius:50%;display:flex;align-items:center;"
@@ -251,7 +334,31 @@ def _document_list(refresh_fn, docs: list[dict] | None = None) -> None:
                         "font-size:12px; color:#8b90a0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"
                     )
 
-                ui.icon("chevron_right").style("color:#8b90a0; flex-shrink:0;")
+                def make_delete_doc(d=doc):
+                    def open_delete():
+                        with ui.dialog() as dlg_del, ui.card().style(
+                            "background:#1a1d27; border:1px solid rgba(255,255,255,.08); border-radius:16px; padding:28px; min-width:380px;"
+                        ):
+                            ui.label("Excluir documento").style("font-size:18px; font-weight:700; color:#f0f2ff;")
+                            ui.label(f'Tem certeza que deseja excluir "{d["title"]}"?').style("font-size:13px; color:#8b90a0; margin:12px 0;")
+
+                            async def confirm_delete():
+                                try:
+                                    await api.api_delete_document_async(state.get_cookies(), d["id"])
+                                    if state.get_current_document().get("id") == d["id"]:
+                                        state.set_current_document({})
+                                    dlg_del.close()
+                                    ui.notify("Documento excluído.", type="positive")
+                                    await refresh_fn()
+                                except Exception as e:
+                                    logger.exception("dashboard.document.delete failed")
+                                    ui.notify(f"Erro ao excluir documento: {str(e)[:80]}", type="negative")
+
+                            with ui.row().style("gap:8px; margin-top:16px;"):
+                                ui.button("Cancelar", on_click=dlg_del.close).classes("vs-btn-ghost")
+                                ui.button("Excluir", on_click=confirm_delete).classes("vs-btn-danger")
+                        dlg_del.open()
+                    return open_delete
 
                 def make_open(d=doc):
                     def open_doc():
@@ -259,7 +366,8 @@ def _document_list(refresh_fn, docs: list[dict] | None = None) -> None:
                         ui.navigate.to("/workspace")
                     return open_doc
 
-                row_card.on("click", make_open(doc))
+                ui.button("Abrir no editor", on_click=make_open(doc)).classes("vs-btn").style("font-size:12px; padding:4px 10px !important;")
+                ui.button("Excluir", on_click=make_delete_doc(doc)).props("onclick=event.stopPropagation()").classes("vs-btn-danger").style("font-size:12px; padding:4px 10px !important;")
 
 
 async def dashboard_page() -> None:
@@ -269,6 +377,8 @@ async def dashboard_page() -> None:
     container = app_layout("/dashboard", "Dashboard", "Gerencie seus projetos e documentos")
 
     with container:
+        project_pending_delete = {"project": None, "total_open_callbacks": 0}
+
         @ui.refreshable
         async def dashboard_content():
             global _dashboard_refresh_count
@@ -324,9 +434,67 @@ async def dashboard_page() -> None:
 
             with ui.grid(columns=2).style("gap:20px; width:100%;"):
                 with ui.column().style("gap:0;"):
-                    _project_selector(projects, refresh)
+                    _project_selector(projects, refresh, open_project_delete_dialog)
                 with ui.column().style("gap:0;"):
                     _document_list(refresh, docs)
             logger.info("dashboard.visual.refresh end count=%s", refresh_number)
+
+        with ui.dialog() as project_delete_dialog, ui.card().style(
+            "background:#1a1d27; border:1px solid rgba(255,255,255,.08); "
+            "border-radius:16px; padding:28px; min-width:380px;"
+        ):
+            ui.label("Excluir projeto").style("font-size:18px; font-weight:700; color:#f0f2ff;")
+            project_delete_text = ui.label("").style("font-size:13px; color:#8b90a0; margin:12px 0;")
+
+            def cancel_project_delete() -> None:
+                project = project_pending_delete["project"]
+                logger.info(
+                    "project.delete.cancel project_id=%s",
+                    project.get("id") if project else None,
+                )
+                project_pending_delete["project"] = None
+                project_delete_dialog.close()
+
+            async def confirm_project_delete() -> None:
+                project = project_pending_delete["project"]
+                if not project:
+                    return
+                logger.info("project.delete.confirm project_id=%s", project.get("id"))
+                try:
+                    response = await api.api_delete_project_async(state.get_cookies(), project["id"])
+                    logger.info(
+                        "project.delete.response project_id=%s response=%s",
+                        project.get("id"),
+                        response,
+                    )
+                except Exception as exc:
+                    logger.exception("dashboard.project.delete failed project_id=%s", project.get("id"))
+                    ui.notify(f"Erro ao excluir projeto: {str(exc)[:80]}", type="negative")
+                    return
+
+                project_delete_dialog.close()
+                project_pending_delete["project"] = None
+                if state.get_current_project().get("id") == project["id"]:
+                    state.set_current_project({})
+                    state.set_current_document({})
+                ui.notify("Projeto excluído.", type="positive")
+                logger.info("project.delete.refresh start project_id=%s", project.get("id"))
+                await dashboard_content.refresh()
+                logger.info("project.delete.refresh end project_id=%s", project.get("id"))
+
+            with ui.row().style("gap:8px; margin-top:16px;"):
+                ui.button("Cancelar", on_click=cancel_project_delete).classes("vs-btn-ghost")
+                ui.button("Excluir projeto", on_click=confirm_project_delete).classes("vs-btn-danger")
+
+        def open_project_delete_dialog(project: dict) -> None:
+            project_pending_delete["total_open_callbacks"] += 1
+            logger.info(
+                "project.delete.dialog_open project_id=%s callback_count=1 total_open_callbacks=%s",
+                project.get("id"),
+                project_pending_delete["total_open_callbacks"],
+            )
+            project_pending_delete["project"] = project
+            project_delete_text.set_text(f'Tem certeza que deseja excluir "{project["name"]}"?')
+            project_delete_dialog.open()
 
         await dashboard_content()

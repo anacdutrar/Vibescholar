@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 from app.routers.auth import get_current_user
 from app.schemas.request import EvidenceStatusUpdate
-from app.schemas.response import SentenceOut, EvidenceSuggestionOut
+from app.schemas.response import EvidenceSuggestionOut
 from app.services.grounding_service import GroundingService
 
 router = APIRouter(tags=["Grounding"])
@@ -15,7 +15,7 @@ class EvidenceSearchRequest(BaseModel):
 
 # --- ENDPOINTS ---
 
-@router.get("/api/documents/{document_id}/sentences", response_model=List[SentenceOut])
+@router.get("/api/documents/{document_id}/sentences")
 def list_document_sentences(
     document_id: int,
     current_user = Depends(get_current_user),
