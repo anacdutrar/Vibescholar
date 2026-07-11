@@ -1,6 +1,7 @@
 import io
 from fastapi import APIRouter, Depends, UploadFile, File, Form, Response, status
-from fastapi.responses import StreamingResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse, StreamingResponse
 from typing import List, Optional
 
 from app.routers.auth import get_current_user
@@ -68,7 +69,7 @@ def autosave_document_content(
     """
     return doc_service.autosave_content(document_id, content_in.content, current_user.id)
 
-@router.post("/api/documents/{document_id}/version", response_model=DocumentVersionOut, status_code=status.HTTP_201_CREATED)
+@router.post("/api/documents/{document_id}/version")
 def save_document_version(
     document_id: int,
     current_user = Depends(get_current_user),
@@ -77,7 +78,10 @@ def save_document_version(
     """
     Manually creates a new version snapshot, splits sentences, and runs grounding analysis.
     """
-    return doc_service.save_version(document_id, current_user.id, current_user.username)
+    result = doc_service.save_version(document_id, current_user.id, current_user.username)
+    if isinstance(result, dict):
+        return JSONResponse(status_code=status.HTTP_200_OK, content=result)
+    return JSONResponse(status_code=status.HTTP_201_CREATED, content=jsonable_encoder(result))
 
 @router.get("/api/documents/{document_id}/versions", response_model=List[DocumentVersionOut])
 def list_document_versions(
@@ -90,7 +94,7 @@ def list_document_versions(
     """
     return doc_service.list_versions(document_id, current_user.id)
 
-@router.post("/api/documents/{document_id}/restore/{version_id}", response_model=DocumentVersionOut, status_code=status.HTTP_201_CREATED)
+@router.post("/api/documents/{document_id}/restore/{version_id}")
 def restore_document_version(
     document_id: int,
     version_id: int,
@@ -98,9 +102,9 @@ def restore_document_version(
     doc_service: DocumentService = Depends()
 ):
     """
-    Restores an old version by creating a new version snapshot containing the historical content.
+    Loads an old version snapshot into the current draft without creating a new version.
     """
-    return doc_service.restore_version(document_id, version_id, current_user.id, current_user.username)
+    return doc_service.restore_version(document_id, version_id, current_user.id)
 
 # --- UPLOAD / IMPORT ---
 @router.post("/api/documents/import", response_model=DocumentOut, status_code=status.HTTP_201_CREATED)

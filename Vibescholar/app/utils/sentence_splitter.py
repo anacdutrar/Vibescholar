@@ -8,6 +8,27 @@ _VERB_HINTS = re.compile(
     re.IGNORECASE,
 )
 
+_REFERENCE_HEADING = re.compile(
+    r"^(?:references|referências|bibliography)\s*:?$", re.IGNORECASE
+)
+_EDITORIAL_PREFIX = re.compile(
+    r"^(?:received\b|accepted\b|published\b|date\s+of\s+publication\b|"
+    r"date\s+of\s+current\s+version\b|copyright\b|©|ieee\b|acm\b|"
+    r"doi\s*:|index\s+terms?\b|keywords?\b)",
+    re.IGNORECASE,
+)
+_BARE_DOI = re.compile(r"^10\.\d{4,9}/\S+\s*$", re.IGNORECASE)
+_TABLE_OR_FIGURE = re.compile(
+    r"^(?:table\s+(?:\d+|[ivxlcdm]+)|fig(?:ure)?\.?\s*\d+)\b",
+    re.IGNORECASE,
+)
+_KNOWN_SECTION_HEADING = re.compile(
+    r"^(?:abstract|resumo|introduction|introdução|methods?|methodology|metodologia|"
+    r"results?|resultados|discussion|discussão|conclusion|conclusão|acknowledg(?:e)?ments?|"
+    r"agradecimentos)\s*:?$",
+    re.IGNORECASE,
+)
+
 
 def _clean_markdown_line(line: str) -> str:
     text = line.strip()
@@ -19,23 +40,73 @@ def _clean_markdown_line(line: str) -> str:
     return text.strip()
 
 
+def _is_mostly_symbols(text: str) -> bool:
+    if not text:
+        return False
+    symbols = sum(1 for char in text if not char.isalnum() and not char.isspace())
+    structural = sum(1 for char in text if char in "-:_|")
+    visible_length = max(sum(1 for char in text if not char.isspace()), 1)
+    return symbols / visible_length > 0.55 or structural / visible_length > 0.60
+
+
+def _is_short_heading(line: str, cleaned: str) -> bool:
+    if re.match(r"^\s{0,3}#{1,6}(?:\s+|$)", line):
+        return True
+    if _KNOWN_SECTION_HEADING.fullmatch(cleaned):
+        return True
+    words = re.findall(r"[A-Za-zÀ-ÿ]+", cleaned)
+    if not words or len(words) > 5 or len(cleaned) > 60:
+        return False
+    if re.search(r"[.!?]$", cleaned) or _VERB_HINTS.search(cleaned):
+        return False
+    is_uppercase = any(char.isalpha() for char in cleaned) and cleaned.upper() == cleaned
+    is_title_case = len(words) >= 2 and all(word[0].isupper() for word in words)
+    return is_uppercase or is_title_case
+
+
+def _is_non_analyzable_line(line: str) -> bool:
+    text = line.strip()
+    if not text:
+        return False
+    cleaned = _clean_markdown_line(text)
+    if "|" in text:
+        return True
+    if re.fullmatch(r"[\s\-:_|]+", text):
+        return True
+    if _is_mostly_symbols(text):
+        return True
+    if _EDITORIAL_PREFIX.match(cleaned):
+        return True
+    if _BARE_DOI.fullmatch(cleaned):
+        return True
+    if _TABLE_OR_FIGURE.match(cleaned):
+        return True
+    return _is_short_heading(text, cleaned)
+
+
+def filter_analyzable_content(content: str) -> str:
+    """Build an analysis-only copy while preserving original offsets and line breaks."""
+    if not content:
+        return content
+
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+    filtered_lines = []
+    inside_references = False
+    for line in normalized.split("\n"):
+        cleaned = _clean_markdown_line(line)
+        if _REFERENCE_HEADING.fullmatch(cleaned):
+            inside_references = True
+        should_ignore = inside_references or _is_non_analyzable_line(line)
+        filtered_lines.append(" " * len(line) if should_ignore else line)
+    return "\n".join(filtered_lines)
+
+
 def _should_skip_markdown_line(line: str) -> bool:
     text = line.strip()
     if not text:
         return True
-    if "|" in text and text.count("|") >= 2:
-        return True
-    if re.fullmatch(r"[\s\-|:]+", text):
-        return True
-    symbols = sum(1 for char in text if not char.isalnum() and not char.isspace())
-    if symbols / max(len(text), 1) > 0.45:
-        return True
     cleaned = _clean_markdown_line(text)
-    if len(cleaned) <= 8:
-        return True
-    if not re.search(r"[.!?]$", cleaned) and not _VERB_HINTS.search(cleaned):
-        return True
-    return False
+    return not cleaned or _is_non_analyzable_line(text)
 
 
 def split_sentences(markdown_content: str) -> List[Dict[str, Any]]:
@@ -47,7 +118,7 @@ def split_sentences(markdown_content: str) -> List[Dict[str, Any]]:
     if not markdown_content:
         return sentences
 
-    normalized_content = markdown_content.replace("\r\n", "\n").replace("\r", "\n")
+    normalized_content = filter_analyzable_content(markdown_content)
     paragraph_blocks = re.split(r"\n{2,}", normalized_content)
     paragraph_number = 0
     current_char_offset = 0
@@ -59,15 +130,9 @@ def split_sentences(markdown_content: str) -> List[Dict[str, Any]]:
         lines = []
         for line in raw_lines:
             if use_joined_block:
-                if "|" in line and line.count("|") >= 2:
-                    continue
-                if re.fullmatch(r"[\s\-|:]+", line.strip()):
+                if _should_skip_markdown_line(line):
                     continue
                 cleaned_line = _clean_markdown_line(line)
-                if cleaned_line.endswith(":") and not re.search(r"[.!?]$", cleaned_line):
-                    continue
-                if len(cleaned_line) <= 8:
-                    continue
                 if cleaned_line:
                     lines.append(cleaned_line)
             elif not _should_skip_markdown_line(line):

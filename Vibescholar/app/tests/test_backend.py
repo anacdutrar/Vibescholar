@@ -1,4 +1,5 @@
 import inspect
+import asyncio
 import pytest
 import httpx
 from fastapi.testclient import TestClient
@@ -18,11 +19,19 @@ from app.schemas.request import UserCreate
 from app.ui import api_client
 from app.ui.pages import dashboard
 from app.ui.pages.workspace import (
+    QUILL_INIT_JS,
+    _is_current_autosave_response,
+    _persist_content_before_version,
+    _persist_content_before_version_locked,
     _detect_apparent_citation,
     _filter_sentences_by_paragraph,
+    _initial_paragraph_filter,
     _paragraph_filter_options,
     _reference_matches_citation,
+    _sentence_panel_view,
+    _set_sentence_view_filter,
 )
+from app.utils.sentence_splitter import filter_analyzable_content, split_sentences
 from app.utils.text_normalizer import normalize_text
 
 # StaticPool forces ALL connections to reuse the same single in-memory connection.
@@ -611,3 +620,360 @@ def test_citation_author_year_matches_library_without_auto_support(client, db_se
     assert match["status"] == "PENDING"
     persisted_sentence = db_session.query(Sentence).filter(Sentence.id == sentence["id"]).one()
     assert persisted_sentence.status == "UNVERIFIED"
+
+
+def test_non_analyzable_editorial_and_structural_blocks_are_filtered():
+    content = """Received April 24, 2018, accepted May 23, 2018, date of publication June 18, 2018, date of current version June 29, 2018.
+
+DOI: 10.1109/EXAMPLE.2018.1
+
+Fig. 2 Experimental overview
+
+Table I Results
+
+| Method | Score |
+|--------|-------|
+| Model A | 0.91 |
+
+A pesquisa científica apresenta resultados válidos e reproduzíveis.
+
+References
+
+Silva, P. Referência que não deve ser analisada. 2022.
+Outra referência também não deve aparecer."""
+
+    sentences = split_sentences(content)
+
+    assert [item["text"] for item in sentences] == [
+        "A pesquisa científica apresenta resultados válidos e reproduzíveis."
+    ]
+    assert "Received" not in " ".join(item["text"] for item in sentences)
+    assert "Referência" not in " ".join(item["text"] for item in sentences)
+
+
+def test_reference_heading_stops_analysis_and_short_normal_text_is_preserved():
+    content = """Texto curto funciona.
+
+Referências
+
+Esta linha possui verbo e pontuação, mas pertence às referências.
+
+Bibliography
+
+Another bibliographic entry is present."""
+
+    sentences = split_sentences(content)
+
+    assert [item["text"] for item in sentences] == ["Texto curto funciona."]
+
+
+def test_isolated_doi_figure_table_and_markdown_table_generate_no_sentences():
+    content = """10.1234/example.5678
+
+Figure 1
+
+Fig. 2
+
+Table 1
+
+Table IV
+
+| Campo | Valor |
+
+-----:::::_____|||||"""
+
+    assert split_sentences(content) == []
+
+
+def test_analysis_filter_does_not_modify_original_document_content(client):
+    client.post("/api/auth/login", json={
+        "username": "testuser",
+        "password": "testpass123",
+    })
+    project = client.post("/api/projects", json={"name": "Filtered Analysis"}).json()
+    original_content = (
+        "Received April 24, 2018, accepted May 23, 2018.\n\n"
+        "Este parágrafo científico permanece disponível para análise.\n\n"
+        "References\n\n"
+        "Uma referência bibliográfica não entra no grounding."
+    )
+    analysis_copy = filter_analyzable_content(original_content)
+    assert original_content.startswith("Received April 24, 2018")
+    assert analysis_copy != original_content
+
+    created = client.post(f"/api/projects/{project['id']}/documents", json={
+        "title": "Documento filtrado",
+        "content": original_content,
+    })
+    assert created.status_code == 201
+    assert created.json()["content"] == original_content
+
+    sentences = client.get(f"/api/documents/{created.json()['id']}/sentences").json()
+    assert [sentence["text"] for sentence in sentences] == [
+        "Este parágrafo científico permanece disponível para análise."
+    ]
+
+
+def _build_large_sentence_collection() -> list[dict]:
+    counts = {paragraph: 1 for paragraph in range(1, 195)}
+    counts[102] = 24
+    remaining = 699 - sum(counts.values())
+    paragraphs = [paragraph for paragraph in range(1, 195) if paragraph != 102]
+    for index in range(remaining):
+        counts[paragraphs[index % len(paragraphs)]] += 1
+
+    sentences = []
+    sentence_id = 1
+    for paragraph, count in counts.items():
+        for sentence_number in range(1, count + 1):
+            sentences.append({
+                "id": sentence_id,
+                "paragraph_number": paragraph,
+                "sentence_number": sentence_number,
+                "text": f"Sentença {sentence_number} do parágrafo {paragraph}.",
+                "status": "UNVERIFIED",
+                "approved_evidence_count": 0,
+            })
+            sentence_id += 1
+    return sentences
+
+
+def test_initial_sentence_panel_renders_only_first_paragraph_page():
+    sentences = _build_large_sentence_collection()
+    initial_filter = _initial_paragraph_filter(sentences)
+    view_state = {"filter": initial_filter, "sentence_page": 1, "summary_page": 1}
+
+    view = _sentence_panel_view(sentences, view_state)
+
+    assert len(sentences) == 699
+    assert initial_filter == "1"
+    assert initial_filter != "all"
+    assert view["mode"] == "sentences"
+    assert view["card_count"] <= 10
+    assert all(item["paragraph_number"] == 1 for item in view["items"])
+
+
+def test_all_paragraphs_view_contains_only_paginated_summaries():
+    sentences = _build_large_sentence_collection()
+    view_state = {"filter": "all", "sentence_page": 1, "summary_page": 1}
+
+    first_page = _sentence_panel_view(sentences, view_state)
+    view_state["summary_page"] = 8
+    last_page = _sentence_panel_view(sentences, view_state)
+
+    assert first_page["mode"] == "summaries"
+    assert first_page["card_count"] == 0
+    assert first_page["summary_count"] == 25
+    assert first_page["total_pages"] == 8
+    assert last_page["page"] == 8
+    assert last_page["summary_count"] == 19
+    assert all("sentence_count" in summary for summary in first_page["items"])
+
+
+def test_sentence_pagination_and_filter_change_reset():
+    sentences = _build_large_sentence_collection()
+    original_paragraphs = [sentence["paragraph_number"] for sentence in sentences]
+    view_state = {"filter": "102", "sentence_page": 1, "summary_page": 1}
+
+    first_page = _sentence_panel_view(sentences, view_state)
+    view_state["sentence_page"] = 3
+    third_page = _sentence_panel_view(sentences, view_state)
+
+    assert first_page["total_items"] == 24
+    assert first_page["total_pages"] == 3
+    assert first_page["card_count"] == 10
+    assert third_page["page"] == 3
+    assert third_page["card_count"] == 4
+
+    _set_sentence_view_filter(view_state, "103")
+    assert view_state == {"filter": "103", "sentence_page": 1, "summary_page": 1}
+    assert [sentence["paragraph_number"] for sentence in sentences] == original_paragraphs
+    assert all(sentence["paragraph_number"] is not None for sentence in sentences)
+
+
+def test_sentence_view_logic_has_no_api_dependency():
+    assert "api." not in inspect.getsource(_initial_paragraph_filter)
+    assert "api." not in inspect.getsource(_sentence_panel_view)
+    assert "api." not in inspect.getsource(_set_sentence_view_filter)
+
+
+def test_restore_loads_draft_without_creating_version_and_preserves_history(client, db_session):
+    client.post("/api/auth/login", json={
+        "username": "testuser",
+        "password": "testpass123",
+    })
+    project = client.post("/api/projects", json={"name": "Version Restore Project"}).json()
+    initial_content = "Conteúdo original da primeira versão."
+    created = client.post(f"/api/projects/{project['id']}/documents", json={
+        "title": "Documento versionado",
+        "content": initial_content,
+    }).json()
+    document_id = created["id"]
+    first_version_id = created["current_version_id"]
+
+    latest_editor_content = "Conteúdo mais recente capturado diretamente do editor."
+    put_response = client.put(f"/api/documents/{document_id}/content", json={
+        "content": latest_editor_content,
+    })
+    assert put_response.status_code == 200
+    second_version = client.post(f"/api/documents/{document_id}/version")
+    assert second_version.status_code == 201
+    assert second_version.json()["content_snapshot"] == latest_editor_content
+
+    versions_before = db_session.query(DocumentVersion).filter(
+        DocumentVersion.document_id == document_id
+    ).order_by(DocumentVersion.version_number).all()
+    history_before = [
+        (version.id, version.version_number, version.content_snapshot)
+        for version in versions_before
+    ]
+    current_version_before_restore = second_version.json()["id"]
+
+    restored = client.post(
+        f"/api/documents/{document_id}/restore/{first_version_id}"
+    )
+    assert restored.status_code == 200
+    assert restored.json() == {
+        "document_id": document_id,
+        "restored_from_version_id": first_version_id,
+        "restored_from_version_number": 1,
+        "content": initial_content,
+    }
+
+    versions_after_restore = db_session.query(DocumentVersion).filter(
+        DocumentVersion.document_id == document_id
+    ).order_by(DocumentVersion.version_number).all()
+    assert len(versions_before) == len(versions_after_restore) == 2
+    assert [
+        (version.id, version.version_number, version.content_snapshot)
+        for version in versions_after_restore
+    ] == history_before
+
+    updated_document = client.get(f"/api/documents/{document_id}").json()
+    assert updated_document["content"] == initial_content
+    assert updated_document["current_version_id"] == current_version_before_restore
+
+    saved_after_restore = client.post(f"/api/documents/{document_id}/version")
+    assert saved_after_restore.status_code == 201
+    assert saved_after_restore.json()["content_snapshot"] == initial_content
+    assert db_session.query(DocumentVersion).filter(
+        DocumentVersion.document_id == document_id
+    ).count() == 3
+
+
+def test_identical_manual_save_returns_200_without_duplicate_version(client, db_session):
+    client.post("/api/auth/login", json={
+        "username": "testuser",
+        "password": "testpass123",
+    })
+    project = client.post("/api/projects", json={"name": "No Duplicate Version"}).json()
+    created = client.post(f"/api/projects/{project['id']}/documents", json={
+        "title": "Documento sem duplicata",
+        "content": "Mesmo conteúdo normalizado.",
+    }).json()
+    document_id = created["id"]
+    count_before = db_session.query(DocumentVersion).filter(
+        DocumentVersion.document_id == document_id
+    ).count()
+
+    response = client.post(f"/api/documents/{document_id}/version")
+
+    assert response.status_code == 200
+    assert response.json()["created"] is False
+    assert response.json()["message"] == "Nenhuma alteração desde a última versão."
+    assert db_session.query(DocumentVersion).filter(
+        DocumentVersion.document_id == document_id
+    ).count() == count_before
+
+
+@pytest.mark.anyio
+async def test_manual_version_persists_content_before_post(monkeypatch):
+    calls = []
+    visible_content = "Conteúdo visível no Quill no instante do clique."
+
+    async def fake_put(cookies, document_id, content):
+        calls.append(("PUT", document_id, content))
+        return {"id": document_id, "content": content}
+
+    async def fake_post(cookies, document_id):
+        calls.append(("POST", document_id))
+        return {"id": 44, "document_id": document_id, "version_number": 3}
+
+    monkeypatch.setattr(api_client, "api_autosave_content_async", fake_put)
+    monkeypatch.setattr(api_client, "api_save_version_async", fake_post)
+
+    result = await _persist_content_before_version(
+        {"session_username": "testuser"}, 9, visible_content
+    )
+
+    assert result["id"] == 44
+    assert calls == [
+        ("PUT", 9, visible_content),
+        ("POST", 9),
+    ]
+
+
+@pytest.mark.anyio
+async def test_pending_autosave_finishes_before_manual_put_and_post(monkeypatch):
+    lock = asyncio.Lock()
+    pending_started = asyncio.Event()
+    release_pending = asyncio.Event()
+    calls = []
+
+    async def pending_autosave():
+        async with lock:
+            calls.append("AUTOSAVE_START")
+            pending_started.set()
+            await release_pending.wait()
+            calls.append("AUTOSAVE_END")
+
+    async def fake_put(cookies, document_id, content):
+        calls.append("MANUAL_PUT")
+        return {"id": document_id, "content": content}
+
+    async def fake_post(cookies, document_id):
+        calls.append("VERSION_POST")
+        return {"id": 45, "document_id": document_id, "version_number": 4}
+
+    monkeypatch.setattr(api_client, "api_autosave_content_async", fake_put)
+    monkeypatch.setattr(api_client, "api_save_version_async", fake_post)
+
+    pending_task = asyncio.create_task(pending_autosave())
+    await pending_started.wait()
+    manual_task = asyncio.create_task(
+        _persist_content_before_version_locked(lock, {}, 9, "Conteúdo atual")
+    )
+    await asyncio.sleep(0)
+    assert calls == ["AUTOSAVE_START"]
+
+    release_pending.set()
+    await pending_task
+    await manual_task
+
+    assert calls == [
+        "AUTOSAVE_START",
+        "AUTOSAVE_END",
+        "MANUAL_PUT",
+        "VERSION_POST",
+    ]
+
+
+def test_quill_programmatic_content_is_silent_and_cancels_autosave():
+    assert "window.__vs_autosave_timer" in QUILL_INIT_JS
+    assert "cancelQuillAutosave();" in QUILL_INIT_JS
+    assert "setText(text, 'silent')" in QUILL_INIT_JS
+    assert "setText(initial, 'silent')" in QUILL_INIT_JS
+    assert "source !== 'user' || window.__vs_loading_content" in QUILL_INIT_JS
+    assert "change_ignored source=" in QUILL_INIT_JS
+
+
+def test_stale_autosave_response_is_ignored_without_editor_regression():
+    autosave_state = {
+        "next_revision": 2,
+        "latest_started": 2,
+        "latest_completed": 0,
+    }
+
+    assert _is_current_autosave_response(autosave_state, 1) is False
+    assert _is_current_autosave_response(autosave_state, 2) is True
+    assert "setQuillContent" not in inspect.getsource(_is_current_autosave_response)

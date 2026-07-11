@@ -101,6 +101,12 @@ class DocumentRepository:
             DocumentVersion.document_id == doc_id
         ).order_by(desc(DocumentVersion.version_number)).all()
 
+    @staticmethod
+    def count_versions(db: Session, doc_id: int) -> int:
+        return db.query(DocumentVersion).filter(
+            DocumentVersion.document_id == doc_id
+        ).count()
+
     # --- SENTENCES ---
     @staticmethod
     def get_sentences_by_version(db: Session, version_id: int) -> List[Sentence]:

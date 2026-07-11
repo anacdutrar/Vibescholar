@@ -14,12 +14,21 @@ Full document editor with:
 """
 import json
 import base64
+import asyncio
+import hashlib
+import math
 import re
+import time
 from nicegui import ui
+from app.core.logging import logger
 from app.ui.components.layout import auth_guard, sidebar, page_header
 from app.ui.styles import GLOBAL_CSS
 from app.ui import state
 from app.ui import api_client as api
+
+
+SENTENCE_PAGE_SIZE = 10
+PARAGRAPH_SUMMARY_PAGE_SIZE = 25
 
 
 # ─── Quill helpers ────────────────────────────────────────────────────────────
@@ -31,6 +40,18 @@ QUILL_CDN = """
 
 QUILL_INIT_JS = """
 <script>
+window.__vs_autosave_timer = window.__vs_autosave_timer || null;
+window.__vs_loading_content = false;
+window.__vs_autosave_revision = window.__vs_autosave_revision || 0;
+
+function cancelQuillAutosave() {
+  if (window.__vs_autosave_timer !== null) {
+    clearTimeout(window.__vs_autosave_timer);
+    window.__vs_autosave_timer = null;
+    console.debug('quill.autosave debounce_cancelled');
+  }
+}
+
 (function initQuill() {
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', _init);
@@ -62,27 +83,40 @@ QUILL_INIT_JS = """
     // Persist initial content if available
     var initial = window.__vs_initial_content || '';
     if (initial) {
-      window.__vs_quill.setText(initial);
+      window.__vs_loading_content = true;
+      window.__vs_quill.setText(initial, 'silent');
+      window.__vs_loading_content = false;
     }
 
     // Autosave: debounce 2 s
-    var _timer = null;
-    window.__vs_quill.on('text-change', function() {
-      clearTimeout(_timer);
-      _timer = setTimeout(function() {
+    window.__vs_quill.on('text-change', function(delta, oldDelta, source) {
+      if (source !== 'user' || window.__vs_loading_content) {
+        console.debug('quill.autosave change_ignored source=' + source);
+        return;
+      }
+      cancelQuillAutosave();
+      window.__vs_autosave_timer = setTimeout(function() {
+        window.__vs_autosave_timer = null;
+        window.__vs_autosave_revision += 1;
         var text = window.__vs_quill.getText();
-        emitEvent('quill_autosave', { content: text });
+        emitEvent('quill_autosave', {
+          content: text,
+          revision: window.__vs_autosave_revision
+        });
       }, 2000);
     });
   }
 })();
 
 function setQuillContent(text) {
+  cancelQuillAutosave();
+  window.__vs_loading_content = true;
   if (window.__vs_quill) {
-    window.__vs_quill.setText(text);
+    window.__vs_quill.setText(text, 'silent');
   } else {
     window.__vs_initial_content = text;
   }
+  window.__vs_loading_content = false;
 }
 
 function getQuillContent() {
@@ -161,6 +195,123 @@ def _filter_sentences_by_paragraph(sentences: list[dict], selected: str) -> list
     return [sentence for sentence in sentences if _paragraph_key(sentence) == selected]
 
 
+def _initial_paragraph_filter(sentences: list[dict]) -> str:
+    options = _paragraph_filter_options(sentences)
+    return next((key for key in options if key != "all"), "all")
+
+
+def _paginate(items: list, page: int, page_size: int) -> tuple[list, int, int]:
+    total_pages = max(1, math.ceil(len(items) / page_size))
+    current_page = min(max(page, 1), total_pages)
+    start = (current_page - 1) * page_size
+    return items[start:start + page_size], current_page, total_pages
+
+
+def _paragraph_summaries(sentences: list[dict]) -> list[dict]:
+    grouped: dict[str, list[dict]] = {}
+    for sentence in sentences:
+        grouped.setdefault(_paragraph_key(sentence), []).append(sentence)
+
+    def sort_key(item: tuple[str, list[dict]]) -> tuple[int, int]:
+        key, _ = item
+        return (1, 0) if key == "unidentified" else (0, int(key))
+
+    summaries = []
+    for key, group in sorted(grouped.items(), key=sort_key):
+        label = "Sem parágrafo identificado" if key == "unidentified" else f"Parágrafo {key}"
+        summaries.append({
+            "key": key,
+            "label": label,
+            "sentence_count": len(group),
+            "approved_evidence_count": sum(
+                int(sentence.get("approved_evidence_count") or 0) for sentence in group
+            ),
+            "unverified_count": sum(
+                1 for sentence in group if sentence.get("status", "UNVERIFIED") == "UNVERIFIED"
+            ),
+        })
+    return summaries
+
+
+def _set_sentence_view_filter(view_state: dict, selected: str) -> None:
+    view_state["filter"] = selected
+    view_state["sentence_page"] = 1
+    view_state["summary_page"] = 1
+
+
+def _sentence_panel_view(sentences: list[dict], view_state: dict) -> dict:
+    selected = view_state["filter"]
+    if selected == "all":
+        items, page, total_pages = _paginate(
+            _paragraph_summaries(sentences),
+            view_state["summary_page"],
+            PARAGRAPH_SUMMARY_PAGE_SIZE,
+        )
+        view_state["summary_page"] = page
+        return {
+            "mode": "summaries",
+            "items": items,
+            "page": page,
+            "total_pages": total_pages,
+            "card_count": 0,
+            "summary_count": len(items),
+        }
+
+    paragraph_sentences = _filter_sentences_by_paragraph(sentences, selected)
+    items, page, total_pages = _paginate(
+        paragraph_sentences,
+        view_state["sentence_page"],
+        SENTENCE_PAGE_SIZE,
+    )
+    view_state["sentence_page"] = page
+    return {
+        "mode": "sentences",
+        "items": items,
+        "total_items": len(paragraph_sentences),
+        "page": page,
+        "total_pages": total_pages,
+        "card_count": len(items),
+        "summary_count": 0,
+    }
+
+
+def _content_digest(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
+
+
+def _is_current_autosave_response(autosave_state: dict, revision: int) -> bool:
+    return revision == autosave_state["latest_started"]
+
+
+async def _persist_content_before_version(cookies: dict, document_id: int, content: str) -> dict:
+    logger.info(
+        "document.version.manual put_start document_id=%s size=%s hash=%s",
+        document_id,
+        len(content),
+        _content_digest(content),
+    )
+    await api.api_autosave_content_async(cookies, document_id, content)
+    logger.info("document.version.manual put_complete_before_post document_id=%s", document_id)
+    result = await api.api_save_version_async(cookies, document_id)
+    logger.info(
+        "document.version.manual post_complete document_id=%s version_id=%s created=%s",
+        document_id,
+        result.get("id"),
+        result.get("created", True),
+    )
+    return result
+
+
+async def _persist_content_before_version_locked(
+    persistence_lock: asyncio.Lock,
+    cookies: dict,
+    document_id: int,
+    content: str,
+) -> dict:
+    async with persistence_lock:
+        return await _persist_content_before_version(cookies, document_id, content)
+
+
 def _toolbar_row(doc: dict, refresh_fn) -> None:
     """Top action bar above the editor."""
     async def save_version_click():
@@ -188,13 +339,59 @@ def _toolbar_row(doc: dict, refresh_fn) -> None:
         ui.button("⚙️ Configurações", on_click=_open_settings_dialog).classes("vs-btn-ghost").style("font-size:13px; padding:6px 14px !important;")
 
 
-async def _save_version(doc: dict, refresh_fn) -> None:
+async def _save_version(
+    doc: dict,
+    refresh_fn,
+    save_button=None,
+    save_status=None,
+    operation_state: dict | None = None,
+    persistence_lock: asyncio.Lock | None = None,
+    autosave_state: dict | None = None,
+) -> None:
+    operation_state = operation_state or {"running": False}
+    persistence_lock = persistence_lock or asyncio.Lock()
+    autosave_state = autosave_state or {"latest_started": 0}
+    if operation_state["running"]:
+        return
+    if autosave_state.get("loading_draft"):
+        ui.notify("Aguarde o carregamento do rascunho.", type="warning")
+        return
+    operation_state["running"] = True
+    if save_button is not None:
+        save_button.disable()
     try:
-        await api.api_save_version_async(state.get_cookies(), doc["id"])
-        ui.notify("✅ Versão salva com sucesso!", type="positive")
+        content = await ui.run_javascript("getQuillContent()")
+        await ui.run_javascript("cancelQuillAutosave()")
+        logger.info("quill.autosave debounce_cancelled reason=manual_version document_id=%s", doc["id"])
+        autosave_state["next_revision"] = autosave_state.get("next_revision", 0) + 1
+        autosave_state["latest_started"] = autosave_state["next_revision"]
+        if save_status is not None:
+            save_status.set_text("Salvando…")
+        result = await _persist_content_before_version_locked(
+            persistence_lock,
+            state.get_cookies(),
+            doc["id"],
+            content or "",
+        )
+        doc["content"] = content or ""
+        state.set_current_document(doc)
+        if result.get("created") is False:
+            message = result.get("message", "Nenhuma alteração desde a última versão.")
+            ui.notify(message, type="info")
+        else:
+            ui.notify("Versão salva com sucesso!", type="positive")
+        if save_status is not None:
+            save_status.set_text("Rascunho salvo")
         await refresh_fn()
     except Exception as e:
+        logger.exception("document.version.manual failed document_id=%s", doc.get("id"))
+        if save_status is not None:
+            save_status.set_text("Erro ao salvar rascunho")
         ui.notify(f"Erro ao salvar versão: {str(e)[:80]}", type="negative")
+    finally:
+        operation_state["running"] = False
+        if save_button is not None:
+            save_button.enable()
 
 
 def _open_export_dialog(doc: dict) -> None:
@@ -374,7 +571,12 @@ async def _open_settings_dialog() -> None:
     dlg.open()
 
 
-async def _version_selector(doc: dict, refresh_fn) -> None:
+async def _version_selector(
+    doc: dict,
+    refresh_fn,
+    persistence_lock: asyncio.Lock,
+    autosave_state: dict,
+) -> None:
     """Version history panel."""
     versions = []
     try:
@@ -405,22 +607,75 @@ async def _version_selector(doc: dict, refresh_fn) -> None:
                     ui.label(f"Por {ver.get('created_by','?')} · {created}").style("font-size:11px; color:#8b90a0;")
 
                 def make_restore(v=ver):
-                    async def restore():
-                        try:
-                            await api.api_restore_version_async(state.get_cookies(), doc["id"], v["id"])
-                            ui.notify(f"✅ Versão {v['version_number']} restaurada!", type="positive")
-                            await refresh_fn()
-                        except Exception as e:
-                            ui.notify(f"Erro: {str(e)[:80]}", type="negative")
-                    return restore
+                    def open_confirmation():
+                        with ui.dialog() as dialog, ui.card().style(
+                            "background:#1a1d27; border:1px solid rgba(255,255,255,.08); "
+                            "border-radius:16px; padding:24px; min-width:420px;"
+                        ):
+                            ui.label("Carregar versão como rascunho").style(
+                                "font-size:17px; font-weight:700; color:#f0f2ff;"
+                            )
+                            ui.label(
+                                f"O conteúdo atual do rascunho será substituído pela versão {v['version_number']}."
+                            ).style("font-size:13px; color:#b8bdcc; margin:10px 0;")
 
-                ui.button("Restaurar", on_click=make_restore(ver)).style(
+                            async def confirm_restore() -> None:
+                                autosave_state["loading_draft"] = True
+                                try:
+                                    await ui.run_javascript("cancelQuillAutosave()")
+                                    logger.info(
+                                        "quill.autosave debounce_cancelled reason=load_draft document_id=%s",
+                                        doc["id"],
+                                    )
+                                    autosave_state["next_revision"] = autosave_state.get("next_revision", 0) + 1
+                                    autosave_state["latest_started"] = autosave_state["next_revision"]
+                                    async with persistence_lock:
+                                        restored = await api.api_restore_version_async(
+                                            state.get_cookies(), doc["id"], v["id"]
+                                        )
+                                        restored_content = restored.get("content") or ""
+                                        await ui.run_javascript(
+                                            f"setQuillContent({json.dumps(restored_content)})"
+                                        )
+                                        doc["content"] = restored_content
+                                        state.set_current_document(doc)
+                                    dialog.close()
+                                    ui.notify(
+                                        f"Versão {v['version_number']} carregada como rascunho. "
+                                        "Salve uma nova versão quando desejar.",
+                                        type="positive",
+                                    )
+                                    await refresh_fn()
+                                except Exception as exc:
+                                    logger.exception(
+                                        "document.version.load_draft failed document_id=%s version_id=%s",
+                                        doc.get("id"),
+                                        v.get("id"),
+                                    )
+                                    ui.notify(f"Erro: {str(exc)[:80]}", type="negative")
+                                finally:
+                                    autosave_state["loading_draft"] = False
+
+                            with ui.row().style("gap:8px; margin-top:14px;"):
+                                ui.button("Cancelar", on_click=dialog.close).classes("vs-btn-ghost")
+                                ui.button(
+                                    "Carregar como rascunho", on_click=confirm_restore
+                                ).classes("vs-btn")
+                        dialog.open()
+                    return open_confirmation
+
+                ui.button("Carregar como rascunho", on_click=make_restore(ver)).style(
                     "background:transparent; border:1px solid rgba(99,102,241,.3); color:#6366f1; "
                     "border-radius:6px; font-size:11px; padding:4px 10px; flex-shrink:0;"
                 )
 
 
-async def _right_panel(doc: dict, refresh_fn) -> None:
+async def _right_panel(
+    doc: dict,
+    refresh_fn,
+    persistence_lock: asyncio.Lock,
+    autosave_state: dict,
+) -> None:
     """Right side panel: sentence list, evidence panel, version selector, grounding dashboard."""
     tabs = ui.tabs().style("margin-bottom:0; border-bottom:1px solid rgba(255,255,255,.07);")
     with tabs:
@@ -442,26 +697,90 @@ async def _right_panel(doc: dict, refresh_fn) -> None:
                     "font-size:13px; color:#8b90a0;"
                 )
             else:
-                paragraph_filter = {"value": "all"}
                 ignored_citations: set[int] = set()
                 options = _paragraph_filter_options(sentences)
+                view_state = {
+                    "filter": _initial_paragraph_filter(sentences),
+                    "sentence_page": 1,
+                    "summary_page": 1,
+                }
+                render_sequence = {"value": 0}
+                paragraph_count = len(options) - 1
+                logger.info(
+                    "workspace.sentences.loaded total=%s paragraphs=%s initial_paragraph=%s",
+                    len(sentences),
+                    paragraph_count,
+                    view_state["filter"],
+                )
 
                 async def refresh_sentence_panel() -> None:
                     sentence_cards.refresh()
 
                 @ui.refreshable
                 def sentence_cards() -> None:
-                    visible_sentences = _filter_sentences_by_paragraph(
-                        sentences, paragraph_filter["value"]
-                    )
-                    count = len(visible_sentences)
-                    count_label = "sentença" if count == 1 else "sentenças"
-                    scope_label = "no documento" if paragraph_filter["value"] == "all" else "neste parágrafo"
-                    ui.label(f"{count} {count_label} {scope_label}").style(
-                        "font-size:12px; color:#8b90a0; margin-bottom:10px;"
-                    )
+                    started_at = time.perf_counter()
+                    render_sequence["value"] += 1
+                    view = _sentence_panel_view(sentences, view_state)
 
-                    for sent in visible_sentences:
+                    if view["mode"] == "summaries":
+                        ui.label(f"{len(options) - 1} parágrafos no documento").style(
+                            "font-size:12px; color:#8b90a0; margin-bottom:10px;"
+                        )
+                        for summary in view["items"]:
+                            sentence_label = "sentença" if summary["sentence_count"] == 1 else "sentenças"
+                            with ui.row().style(
+                                "background:#212435; border:1px solid rgba(255,255,255,.07); "
+                                "border-radius:8px; padding:10px 12px; margin-bottom:6px; "
+                                "align-items:center; justify-content:space-between; width:100%; gap:10px;"
+                            ):
+                                with ui.column().style("gap:2px; min-width:0; flex:1;"):
+                                    ui.label(
+                                        f"{summary['label']} — {summary['sentence_count']} {sentence_label}"
+                                    ).style("font-size:13px; font-weight:600; color:#f0f2ff;")
+                                    ui.label(
+                                        f"{summary['approved_evidence_count']} evidência(s) aprovada(s) · "
+                                        f"{summary['unverified_count']} não verificada(s)"
+                                    ).style("font-size:11px; color:#8b90a0;")
+
+                                def make_open_paragraph(paragraph_key=summary["key"]):
+                                    def open_paragraph() -> None:
+                                        _set_sentence_view_filter(view_state, paragraph_key)
+                                        paragraph_select.value = paragraph_key
+                                        sentence_cards.refresh()
+                                    return open_paragraph
+
+                                ui.button(
+                                    "Ver sentenças", on_click=make_open_paragraph()
+                                ).classes("vs-btn-ghost").style("font-size:11px;")
+
+                        with ui.row().style(
+                            "align-items:center; justify-content:center; gap:10px; margin-top:10px; width:100%;"
+                        ):
+                            def previous_summary_page() -> None:
+                                view_state["summary_page"] = max(1, view["page"] - 1)
+                                sentence_cards.refresh()
+
+                            def next_summary_page() -> None:
+                                view_state["summary_page"] = min(view["total_pages"], view["page"] + 1)
+                                sentence_cards.refresh()
+
+                            previous_button = ui.button("Anterior", on_click=previous_summary_page).classes("vs-btn-ghost")
+                            if view["page"] == 1:
+                                previous_button.disable()
+                            ui.label(f"Página {view['page']} de {view['total_pages']}").style(
+                                "font-size:12px; color:#b8bdcc;"
+                            )
+                            next_button = ui.button("Próximo", on_click=next_summary_page).classes("vs-btn-ghost")
+                            if view["page"] == view["total_pages"]:
+                                next_button.disable()
+                    else:
+                        count = view["total_items"]
+                        count_label = "sentença" if count == 1 else "sentenças"
+                        ui.label(f"{count} {count_label} neste parágrafo").style(
+                            "font-size:12px; color:#8b90a0; margin-bottom:10px;"
+                        )
+
+                    for sent in view["items"] if view["mode"] == "sentences" else []:
                         status = sent.get("status", "UNVERIFIED")
                         pill_cls = {
                             "SUPPORTED": "pill-supported",
@@ -545,13 +864,52 @@ async def _right_panel(doc: dict, refresh_fn) -> None:
                                 "color:#818cf8; border-radius:6px; font-size:11px; padding:4px 12px; margin-top:8px;"
                             )
 
+                    if view["mode"] == "sentences" and view["total_pages"] > 1:
+                        with ui.row().style(
+                            "align-items:center; justify-content:center; gap:10px; margin-top:10px; width:100%;"
+                        ):
+                            def previous_sentence_page() -> None:
+                                view_state["sentence_page"] = max(1, view["page"] - 1)
+                                sentence_cards.refresh()
+
+                            def next_sentence_page() -> None:
+                                view_state["sentence_page"] = min(view["total_pages"], view["page"] + 1)
+                                sentence_cards.refresh()
+
+                            previous_button = ui.button("Anterior", on_click=previous_sentence_page).classes("vs-btn-ghost")
+                            if view["page"] == 1:
+                                previous_button.disable()
+                            ui.label(f"Página {view['page']} de {view['total_pages']}").style(
+                                "font-size:12px; color:#b8bdcc;"
+                            )
+                            next_button = ui.button("Próximo", on_click=next_sentence_page).classes("vs-btn-ghost")
+                            if view["page"] == view["total_pages"]:
+                                next_button.disable()
+
+                    elapsed = time.perf_counter() - started_at
+                    logger.info(
+                        "workspace.sentences.render sequence=%s filter=%s cards=%s summaries=%s elapsed=%.4f",
+                        render_sequence["value"],
+                        view_state["filter"],
+                        view["card_count"],
+                        view["summary_count"],
+                        elapsed,
+                    )
+                    if render_sequence["value"] == 1:
+                        logger.info(
+                            "workspace.sentences.initial cards=%s paragraph=%s elapsed=%.4f",
+                            view["card_count"],
+                            view_state["filter"],
+                            elapsed,
+                        )
+
                 def change_paragraph(event) -> None:
-                    paragraph_filter["value"] = event.value
+                    _set_sentence_view_filter(view_state, event.value)
                     sentence_cards.refresh()
 
-                ui.select(
+                paragraph_select = ui.select(
                     options=options,
-                    value=paragraph_filter["value"],
+                    value=view_state["filter"],
                     label="Parágrafo",
                     on_change=change_paragraph,
                 ).style("width:100%; margin-bottom:10px;")
@@ -593,7 +951,7 @@ async def _right_panel(doc: dict, refresh_fn) -> None:
 
         # ── Version history ──────────────────────────────────────────────────
         with ui.tab_panel(t_history):
-            await _version_selector(doc, refresh_fn)
+            await _version_selector(doc, refresh_fn, persistence_lock, autosave_state)
 
 
 async def _citation_review_dialog(
@@ -844,8 +1202,16 @@ async def workspace_page() -> None:
         except Exception:
             ui.notify("Não foi possível carregar documentos do projeto.", type="warning")
 
-    async def refresh():
-        # Reload current document data from API
+    persistence_lock = asyncio.Lock()
+    autosave_state = {
+        "next_revision": 0,
+        "latest_started": 0,
+        "latest_completed": 0,
+        "loading_draft": False,
+    }
+    save_operation = {"running": False}
+
+    async def refresh_analysis_panel() -> None:
         nonlocal doc
         if doc and doc.get("id"):
             try:
@@ -853,7 +1219,7 @@ async def workspace_page() -> None:
                 state.set_current_document(doc)
             except Exception:
                 ui.notify("Não foi possível atualizar o documento.", type="negative")
-        ui.navigate.to("/workspace")
+        await right_panel_content.refresh()
 
     with ui.row().style("width:100%; min-height:100vh; gap:0; background:#0f1117;"):
         # Sidebar
@@ -887,7 +1253,7 @@ async def workspace_page() -> None:
                 "background:#1a1d27; border:1px solid rgba(255,255,255,.07); border-radius:12px; "
                 "padding:10px 16px; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:16px;"
             ):
-                _document_selector(refresh, project_docs)
+                _document_selector(refresh_analysis_panel, project_docs)
                 ui.element("div").style("flex:1;")
 
                 score = doc.get("grounding_score", 0.0)
@@ -899,9 +1265,18 @@ async def workspace_page() -> None:
                 ).add_slot("default", f"<span>{int(score*100)}%</span>")
 
                 async def save_version_click():
-                    await _save_version(doc, refresh)
+                    await _save_version(
+                        doc,
+                        refresh_analysis_panel,
+                        save_button,
+                        save_status,
+                        save_operation,
+                        persistence_lock,
+                        autosave_state,
+                    )
 
-                ui.button("💾 Versão", on_click=save_version_click).classes("vs-btn").style("font-size:13px; padding:6px 14px !important;")
+                save_button = ui.button("💾 Versão", on_click=save_version_click).classes("vs-btn").style("font-size:13px; padding:6px 14px !important;")
+                save_status = ui.label("Rascunho salvo").style("font-size:11px; color:#8b90a0;")
                 ui.button("📤 Exportar", on_click=lambda: _open_export_dialog(doc)).classes("vs-btn-ghost").style("font-size:13px; padding:6px 14px !important;")
                 ui.button("⚙️ Config", on_click=_open_settings_dialog).classes("vs-btn-ghost").style("font-size:13px; padding:6px 14px !important;")
 
@@ -924,10 +1299,55 @@ async def workspace_page() -> None:
                     async def handle_autosave(e):
                         new_content = e.args.get("content", "") if isinstance(e.args, dict) else ""
                         if new_content and doc.get("id"):
+                            if autosave_state["loading_draft"]:
+                                logger.info(
+                                    "quill.autosave ignored_during_draft_load document_id=%s",
+                                    doc["id"],
+                                )
+                                return
+                            autosave_state["next_revision"] += 1
+                            revision = autosave_state["next_revision"]
+                            autosave_state["latest_started"] = revision
+                            browser_revision = e.args.get("revision") if isinstance(e.args, dict) else None
+                            save_status.set_text("Salvando…")
+                            logger.info(
+                                "quill.autosave start document_id=%s revision=%s browser_revision=%s "
+                                "size=%s hash=%s",
+                                doc["id"],
+                                revision,
+                                browser_revision,
+                                len(new_content),
+                                _content_digest(new_content),
+                            )
                             try:
-                                await api.api_autosave_content_async(state.get_cookies(), doc["id"], new_content)
+                                async with persistence_lock:
+                                    await api.api_autosave_content_async(
+                                        state.get_cookies(), doc["id"], new_content
+                                    )
+                                if not _is_current_autosave_response(autosave_state, revision):
+                                    logger.info(
+                                        "quill.autosave stale_response_ignored document_id=%s revision=%s latest=%s",
+                                        doc["id"],
+                                        revision,
+                                        autosave_state["latest_started"],
+                                    )
+                                    return
+                                autosave_state["latest_completed"] = revision
+                                doc["content"] = new_content
+                                save_status.set_text("Rascunho salvo")
+                                logger.info(
+                                    "quill.autosave end document_id=%s revision=%s status=success",
+                                    doc["id"],
+                                    revision,
+                                )
                             except Exception:
-                                ui.notify("Autosave falhou.", type="warning")
+                                logger.exception(
+                                    "quill.autosave end document_id=%s revision=%s status=error",
+                                    doc.get("id"),
+                                    revision,
+                                )
+                                if _is_current_autosave_response(autosave_state, revision):
+                                    save_status.set_text("Erro ao salvar rascunho")
 
                     ui.on("quill_autosave", handle_autosave)
 
@@ -936,4 +1356,13 @@ async def workspace_page() -> None:
                     "width:340px; flex-shrink:0; background:#1a1d27; border:1px solid rgba(255,255,255,.07); "
                     "border-radius:12px; padding:16px;"
                 ):
-                    await _right_panel(doc, refresh)
+                    @ui.refreshable
+                    async def right_panel_content() -> None:
+                        await _right_panel(
+                            doc,
+                            refresh_analysis_panel,
+                            persistence_lock,
+                            autosave_state,
+                        )
+
+                    await right_panel_content()

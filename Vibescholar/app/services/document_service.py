@@ -1,4 +1,5 @@
 import io
+import re
 import uuid
 from fastapi import Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -16,6 +17,11 @@ from app.utils.sentence_splitter import split_sentences
 from app.utils.text_normalizer import normalize_text
 from app.schemas.request import DocumentCreate, DocumentContentUpdate, DocumentUpdate
 from app.exceptions.document import DocumentNotFoundException, ProjectNotFoundException, VersionNotFoundException
+from app.core.logging import logger
+
+
+def _normalize_version_content(content: str) -> str:
+    return re.sub(r"\s+", " ", content or "").strip()
 
 class DocumentService:
     def __init__(self, db: Session = Depends(get_db)):
@@ -134,25 +140,60 @@ class DocumentService:
         self._verify_document_ownership(doc_id, user_id)
         return self.doc_repo.update_content(self.db, doc_id, content)
 
-    def save_version(self, doc_id: int, user_id: int, username: str) -> DocumentVersion:
+    def save_version(self, doc_id: int, user_id: int, username: str):
         doc = self._verify_document_ownership(doc_id, user_id)
-        return self.build_version_snapshot(doc_id, doc.content or "", username)
+        latest_version = self.doc_repo.get_latest_version(self.db, doc_id)
+        if latest_version and _normalize_version_content(doc.content or "") == _normalize_version_content(latest_version.content_snapshot):
+            logger.info(
+                "document.version.skipped document_id=%s current_version_id=%s reason=identical_content",
+                doc_id,
+                latest_version.id,
+            )
+            return {
+                "created": False,
+                "message": "Nenhuma alteração desde a última versão.",
+                "document_id": doc_id,
+                "current_version_id": latest_version.id,
+            }
+        version = self.build_version_snapshot(doc_id, doc.content or "", username)
+        logger.info(
+            "document.version.created document_id=%s version_id=%s version_number=%s",
+            doc_id,
+            version.id,
+            version.version_number,
+        )
+        return version
 
     def list_versions(self, doc_id: int, user_id: int) -> List[DocumentVersion]:
         self._verify_document_ownership(doc_id, user_id)
         return self.doc_repo.list_versions(self.db, doc_id)
 
-    def restore_version(self, doc_id: int, version_id: int, user_id: int, username: str) -> DocumentVersion:
+    def restore_version(self, doc_id: int, version_id: int, user_id: int) -> dict:
         self._verify_document_ownership(doc_id, user_id)
         target_ver = self.doc_repo.get_version_by_id(self.db, version_id)
         if not target_ver or target_ver.document_id != doc_id:
             raise VersionNotFoundException(version_id)
 
-        # 1. Update active draft content to match snapshot
-        self.doc_repo.update_content(self.db, doc_id, target_ver.content_snapshot)
-
-        # 2. Build a new version snapshot referencing this content
-        return self.build_version_snapshot(doc_id, target_ver.content_snapshot, username)
+        versions_before = self.doc_repo.count_versions(self.db, doc_id)
+        updated_document = self.doc_repo.update_content(
+            self.db, doc_id, target_ver.content_snapshot
+        )
+        versions_after = self.doc_repo.count_versions(self.db, doc_id)
+        logger.info(
+            "document.version.loaded_as_draft document_id=%s source_version_id=%s "
+            "source_version_number=%s versions_before=%s versions_after=%s",
+            doc_id,
+            target_ver.id,
+            target_ver.version_number,
+            versions_before,
+            versions_after,
+        )
+        return {
+            "document_id": doc_id,
+            "restored_from_version_id": target_ver.id,
+            "restored_from_version_number": target_ver.version_number,
+            "content": updated_document.content,
+        }
 
     def import_document(self, project_id: int, title: str, filename: str, file_bytes: bytes, user_id: int, username: str) -> Document:
         self._verify_project_ownership(project_id, user_id)
