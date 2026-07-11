@@ -208,9 +208,27 @@ def api_create_document(cookies: Dict[str, str], project_id: int, title: str,
         return r.json()
 
 
+async def api_create_document_async(cookies: Dict[str, str], project_id: int, title: str,
+                                    description: str = "", content: str = "") -> Dict:
+    async with _async_client(cookies) as c:
+        r = await c.post(
+            f"/api/projects/{project_id}/documents",
+            json={"title": title, "description": description, "content": content}
+        )
+        r.raise_for_status()
+        return r.json()
+
+
 def api_get_document(cookies: Dict[str, str], document_id: int) -> Dict:
     with _client(cookies) as c:
         r = c.get(f"/api/documents/{document_id}")
+        r.raise_for_status()
+        return r.json()
+
+
+async def api_get_document_async(cookies: Dict[str, str], document_id: int) -> Dict:
+    async with _async_client(cookies) as c:
+        r = await c.get(f"/api/documents/{document_id}")
         r.raise_for_status()
         return r.json()
 
@@ -222,6 +240,13 @@ def api_autosave_content(cookies: Dict[str, str], document_id: int, content: str
         return r.json()
 
 
+async def api_autosave_content_async(cookies: Dict[str, str], document_id: int, content: str) -> Dict:
+    async with _async_client(cookies) as c:
+        r = await c.put(f"/api/documents/{document_id}/content", json={"content": content})
+        r.raise_for_status()
+        return r.json()
+
+
 def api_save_version(cookies: Dict[str, str], document_id: int) -> Dict:
     with _client(cookies) as c:
         r = c.post(f"/api/documents/{document_id}/version")
@@ -229,9 +254,23 @@ def api_save_version(cookies: Dict[str, str], document_id: int) -> Dict:
         return r.json()
 
 
+async def api_save_version_async(cookies: Dict[str, str], document_id: int) -> Dict:
+    async with _async_client(cookies) as c:
+        r = await c.post(f"/api/documents/{document_id}/version")
+        r.raise_for_status()
+        return r.json()
+
+
 def api_list_versions(cookies: Dict[str, str], document_id: int) -> List[Dict]:
     with _client(cookies) as c:
         r = c.get(f"/api/documents/{document_id}/versions")
+        r.raise_for_status()
+        return r.json()
+
+
+async def api_list_versions_async(cookies: Dict[str, str], document_id: int) -> List[Dict]:
+    async with _async_client(cookies) as c:
+        r = await c.get(f"/api/documents/{document_id}/versions")
         r.raise_for_status()
         return r.json()
 
@@ -262,6 +301,18 @@ def api_import_document(cookies: Dict[str, str], project_id: int, title: str,
         return r.json()
 
 
+async def api_import_document_async(cookies: Dict[str, str], project_id: int, title: str,
+                                    filename: str, file_bytes: bytes) -> Dict:
+    async with _async_client(cookies) as c:
+        r = await c.post(
+            "/api/documents/import",
+            data={"project_id": project_id, "title": title},
+            files={"file": (filename, file_bytes, "application/octet-stream")}
+        )
+        r.raise_for_status()
+        return r.json()
+
+
 def api_export_document_url(document_id: int, export_format: str) -> str:
     return f"{BASE_URL}/api/documents/{document_id}/export/{export_format}"
 
@@ -271,6 +322,13 @@ def api_export_document_url(document_id: int, export_format: str) -> str:
 def api_list_sentences(cookies: Dict[str, str], document_id: int) -> List[Dict]:
     with _client(cookies) as c:
         r = c.get(f"/api/documents/{document_id}/sentences")
+        r.raise_for_status()
+        return r.json()
+
+
+async def api_list_sentences_async(cookies: Dict[str, str], document_id: int) -> List[Dict]:
+    async with _async_client(cookies) as c:
+        r = await c.get(f"/api/documents/{document_id}/sentences")
         r.raise_for_status()
         return r.json()
 
@@ -292,6 +350,13 @@ def api_update_suggestion_status(cookies: Dict[str, str], suggestion_id: int, st
 def api_get_grounding_summary(cookies: Dict[str, str], document_id: int) -> Dict:
     with _client(cookies) as c:
         r = c.get(f"/api/documents/{document_id}/grounding")
+        r.raise_for_status()
+        return r.json()
+
+
+async def api_get_grounding_summary_async(cookies: Dict[str, str], document_id: int) -> Dict:
+    async with _async_client(cookies) as c:
+        r = await c.get(f"/api/documents/{document_id}/grounding")
         r.raise_for_status()
         return r.json()
 

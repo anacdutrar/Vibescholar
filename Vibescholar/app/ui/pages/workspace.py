@@ -93,8 +93,15 @@ function getQuillContent() {
 """
 
 
+async def _read_upload_file(uploaded_file) -> tuple[str, bytes]:
+    return uploaded_file.name, await uploaded_file.read()
+
+
 def _toolbar_row(doc: dict, refresh_fn) -> None:
     """Top action bar above the editor."""
+    async def save_version_click():
+        await _save_version(doc, refresh_fn)
+
     with ui.row().style(
         "background:#1a1d27; border:1px solid rgba(255,255,255,.07); border-radius:12px; "
         "padding:12px 16px; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:16px;"
@@ -112,17 +119,17 @@ def _toolbar_row(doc: dict, refresh_fn) -> None:
             f"font-size:11px; font-weight:700; color:{color};"
         ).add_slot("default", f"<span>{int(score*100)}%</span>")
 
-        ui.button("💾 Salvar Versão", on_click=lambda: _save_version(doc, refresh_fn)).classes("vs-btn").style("font-size:13px; padding:6px 14px !important;")
+        ui.button("💾 Salvar Versão", on_click=save_version_click).classes("vs-btn").style("font-size:13px; padding:6px 14px !important;")
         ui.button("📤 Exportar", on_click=lambda: _open_export_dialog(doc)).classes("vs-btn-ghost").style("font-size:13px; padding:6px 14px !important;")
         ui.button("📥 Importar", on_click=lambda: _open_import_dialog(refresh_fn)).classes("vs-btn-ghost").style("font-size:13px; padding:6px 14px !important;")
         ui.button("⚙️ Configurações", on_click=lambda: _open_settings_dialog()).classes("vs-btn-ghost").style("font-size:13px; padding:6px 14px !important;")
 
 
-def _save_version(doc: dict, refresh_fn) -> None:
+async def _save_version(doc: dict, refresh_fn) -> None:
     try:
-        api.api_save_version(state.get_cookies(), doc["id"])
+        await api.api_save_version_async(state.get_cookies(), doc["id"])
         ui.notify("✅ Versão salva com sucesso!", type="positive")
-        refresh_fn()
+        await refresh_fn()
     except Exception as e:
         ui.notify(f"Erro ao salvar versão: {str(e)[:80]}", type="negative")
 
@@ -185,7 +192,7 @@ def _open_import_dialog(refresh_fn) -> None:
 
         file_data = {"name": None, "content": None}
 
-        def handle_upload(e):
+        async def handle_upload(e):
             uploaded_file = e.file
             filename = uploaded_file.name
             if not filename.lower().endswith((".docx", ".md", ".txt")):
@@ -195,15 +202,23 @@ def _open_import_dialog(refresh_fn) -> None:
                 lbl_imp_err.set_text("Arquivo inválido. Use .docx, .md ou .txt.")
                 upload.reset()
                 return
+            try:
+                filename, content = await _read_upload_file(uploaded_file)
+            except Exception as exc:
+                file_data["name"] = None
+                file_data["content"] = None
+                selected_file_label.set_text("Nenhum arquivo selecionado")
+                lbl_imp_err.set_text(f"Erro ao ler arquivo: {str(exc)[:80]}")
+                return
             file_data["name"] = filename
-            file_data["content"] = uploaded_file.read()
-            selected_file_label.set_text(filename)
+            file_data["content"] = content
+            selected_file_label.set_text(f"{filename} ({len(content)} bytes)")
             lbl_imp_err.set_text("")
             upload.reset()
 
         upload.on_upload(handle_upload)
 
-        def do_import():
+        async def do_import():
             lbl_imp_err.set_text("")
             title = inp_imp_title.value.strip()
             if not title:
@@ -213,13 +228,13 @@ def _open_import_dialog(refresh_fn) -> None:
                 lbl_imp_err.set_text("Selecione um arquivo.")
                 return
             try:
-                doc = api.api_import_document(
+                doc = await api.api_import_document_async(
                     state.get_cookies(), project["id"], title,
                     file_data["name"], file_data["content"]
                 )
                 state.set_current_document(doc)
                 dlg.close()
-                refresh_fn()
+                await refresh_fn()
                 ui.notify("✅ Documento importado com sucesso!", type="positive")
             except Exception as e:
                 lbl_imp_err.set_text(f"Erro: {str(e)[:100]}")
@@ -280,13 +295,13 @@ def _open_settings_dialog() -> None:
     dlg.open()
 
 
-def _version_selector(doc: dict, refresh_fn) -> None:
+async def _version_selector(doc: dict, refresh_fn) -> None:
     """Version history panel."""
     versions = []
     try:
-        versions = api.api_list_versions(state.get_cookies(), doc["id"])
+        versions = await api.api_list_versions_async(state.get_cookies(), doc["id"])
     except Exception:
-        pass
+        ui.label("Não foi possível carregar o histórico.").style("font-size:13px; color:#ef4444;")
 
     with ui.column().style("gap:8px;"):
         ui.label("Histórico de Versões").style("font-size:15px; font-weight:700; color:#f0f2ff; margin-bottom:4px;")
@@ -311,11 +326,11 @@ def _version_selector(doc: dict, refresh_fn) -> None:
                     ui.label(f"Por {ver.get('created_by','?')} · {created}").style("font-size:11px; color:#8b90a0;")
 
                 def make_restore(v=ver):
-                    def restore():
+                    async def restore():
                         try:
                             api.api_restore_version(state.get_cookies(), doc["id"], v["id"])
                             ui.notify(f"✅ Versão {v['version_number']} restaurada!", type="positive")
-                            refresh_fn()
+                            await refresh_fn()
                         except Exception as e:
                             ui.notify(f"Erro: {str(e)[:80]}", type="negative")
                     return restore
@@ -326,7 +341,7 @@ def _version_selector(doc: dict, refresh_fn) -> None:
                 )
 
 
-def _right_panel(doc: dict, refresh_fn) -> None:
+async def _right_panel(doc: dict, refresh_fn) -> None:
     """Right side panel: sentence list, evidence panel, version selector, grounding dashboard."""
     tabs = ui.tabs().style("margin-bottom:0; border-bottom:1px solid rgba(255,255,255,.07);")
     with tabs:
@@ -339,9 +354,9 @@ def _right_panel(doc: dict, refresh_fn) -> None:
         with ui.tab_panel(t_sentences):
             sentences = []
             try:
-                sentences = api.api_list_sentences(state.get_cookies(), doc["id"])
+                sentences = await api.api_list_sentences_async(state.get_cookies(), doc["id"])
             except Exception:
-                pass
+                ui.label("Não foi possível carregar as sentenças.").style("font-size:13px; color:#ef4444;")
 
             if not sentences:
                 ui.label("Nenhuma sentença extraída. Salve uma versão primeiro.").style(
@@ -379,9 +394,9 @@ def _right_panel(doc: dict, refresh_fn) -> None:
         with ui.tab_panel(t_grounding):
             summary = {}
             try:
-                summary = api.api_get_grounding_summary(state.get_cookies(), doc["id"])
+                summary = await api.api_get_grounding_summary_async(state.get_cookies(), doc["id"])
             except Exception:
-                pass
+                summary = {}
 
             if not summary:
                 ui.label("Nenhum relatório disponível ainda.").style("font-size:13px; color:#8b90a0;")
@@ -411,7 +426,7 @@ def _right_panel(doc: dict, refresh_fn) -> None:
 
         # ── Version history ──────────────────────────────────────────────────
         with ui.tab_panel(t_history):
-            _version_selector(doc, refresh_fn)
+            await _version_selector(doc, refresh_fn)
 
 
 def _evidence_panel(sentence: dict, doc: dict, refresh_fn) -> None:
@@ -478,23 +493,23 @@ def _render_suggestions(suggestions: list, dlg, refresh_fn) -> None:
             if status == "PENDING":
                 with ui.row().style("gap:8px; margin-top:12px;"):
                     def make_approve(sid=sug["id"]):
-                        def approve():
+                        async def approve():
                             try:
                                 api.api_update_suggestion_status(state.get_cookies(), sid, "APPROVED")
                                 ui.notify("✅ Evidência aprovada!", type="positive")
                                 dlg.close()
-                                refresh_fn()
+                                await refresh_fn()
                             except Exception as e:
                                 ui.notify(f"Erro: {str(e)[:60]}", type="negative")
                         return approve
 
                     def make_reject(sid=sug["id"]):
-                        def reject():
+                        async def reject():
                             try:
                                 api.api_update_suggestion_status(state.get_cookies(), sid, "REJECTED")
                                 ui.notify("Evidência rejeitada.", type="info")
                                 dlg.close()
-                                refresh_fn()
+                                await refresh_fn()
                             except Exception as e:
                                 ui.notify(f"Erro: {str(e)[:60]}", type="negative")
                         return reject
@@ -509,17 +524,11 @@ def _render_suggestions(suggestions: list, dlg, refresh_fn) -> None:
                     )
 
 
-def _document_selector(refresh_fn) -> None:
+def _document_selector(refresh_fn, docs: list[dict]) -> None:
     """Document selector dropdown in the toolbar area."""
     project = state.get_current_project()
     if not project:
         return
-    docs = []
-    try:
-        docs = api.api_list_documents(state.get_cookies(), project["id"])
-    except Exception:
-        pass
-
     if not docs:
         return
 
@@ -532,7 +541,7 @@ def _document_selector(refresh_fn) -> None:
         for d in docs:
             if d["id"] == selected_id:
                 state.set_current_document(d)
-                refresh_fn()
+                ui.navigate.to("/workspace")
                 break
 
     ui.select(
@@ -543,7 +552,7 @@ def _document_selector(refresh_fn) -> None:
     ).style("min-width:200px;")
 
 
-def workspace_page() -> None:
+async def workspace_page() -> None:
     if not auth_guard():
         return
 
@@ -554,16 +563,22 @@ def workspace_page() -> None:
 
     doc = state.get_current_document()
     project = state.get_current_project()
+    project_docs = []
+    if project:
+        try:
+            project_docs = await api.api_list_documents_async(state.get_cookies(), project["id"])
+        except Exception:
+            ui.notify("Não foi possível carregar documentos do projeto.", type="warning")
 
-    def refresh():
+    async def refresh():
         # Reload current document data from API
         nonlocal doc
         if doc and doc.get("id"):
             try:
-                doc = api.api_get_document(state.get_cookies(), doc["id"])
+                doc = await api.api_get_document_async(state.get_cookies(), doc["id"])
                 state.set_current_document(doc)
             except Exception:
-                pass
+                ui.notify("Não foi possível atualizar o documento.", type="negative")
         ui.navigate.to("/workspace")
 
     with ui.row().style("width:100%; min-height:100vh; gap:0; background:#0f1117;"):
@@ -599,7 +614,7 @@ def workspace_page() -> None:
                 "background:#1a1d27; border:1px solid rgba(255,255,255,.07); border-radius:12px; "
                 "padding:10px 16px; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:16px;"
             ):
-                _document_selector(refresh)
+                _document_selector(refresh, project_docs)
                 ui.element("div").style("flex:1;")
 
                 score = doc.get("grounding_score", 0.0)
@@ -610,7 +625,10 @@ def workspace_page() -> None:
                     f"font-size:11px; font-weight:700; color:{color};"
                 ).add_slot("default", f"<span>{int(score*100)}%</span>")
 
-                ui.button("💾 Versão", on_click=lambda: _save_version(doc, refresh)).classes("vs-btn").style("font-size:13px; padding:6px 14px !important;")
+                async def save_version_click():
+                    await _save_version(doc, refresh)
+
+                ui.button("💾 Versão", on_click=save_version_click).classes("vs-btn").style("font-size:13px; padding:6px 14px !important;")
                 ui.button("📤 Exportar", on_click=lambda: _open_export_dialog(doc)).classes("vs-btn-ghost").style("font-size:13px; padding:6px 14px !important;")
                 ui.button("📥 Importar", on_click=lambda: _open_import_dialog(refresh)).classes("vs-btn-ghost").style("font-size:13px; padding:6px 14px !important;")
                 ui.button("⚙️ Config", on_click=lambda: _open_settings_dialog()).classes("vs-btn-ghost").style("font-size:13px; padding:6px 14px !important;")
@@ -623,7 +641,7 @@ def workspace_page() -> None:
                     with ui.element("div").style(
                         "background:#1a1d27; border:1px solid rgba(255,255,255,.07); border-radius:12px; overflow:hidden;"
                     ):
-                        ui.element("div").attr("id", "quill-mount").style("min-height:500px;")
+                        ui.element("div").props('id="quill-mount"').style("min-height:500px;")
 
                     # Load content into Quill
                     content = doc.get("content") or ""
@@ -635,9 +653,9 @@ def workspace_page() -> None:
                         new_content = e.args.get("content", "") if isinstance(e.args, dict) else ""
                         if new_content and doc.get("id"):
                             try:
-                                api.api_autosave_content(state.get_cookies(), doc["id"], new_content)
+                                await api.api_autosave_content_async(state.get_cookies(), doc["id"], new_content)
                             except Exception:
-                                pass
+                                ui.notify("Autosave falhou.", type="warning")
 
                     ui.on("quill_autosave", handle_autosave)
 
@@ -646,4 +664,4 @@ def workspace_page() -> None:
                     "width:340px; flex-shrink:0; background:#1a1d27; border:1px solid rgba(255,255,255,.07); "
                     "border-radius:12px; padding:16px;"
                 ):
-                    _right_panel(doc, refresh)
+                    await _right_panel(doc, refresh)

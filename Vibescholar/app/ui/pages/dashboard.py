@@ -188,20 +188,22 @@ def _document_list(refresh_fn, docs: list[dict] | None = None) -> None:
                 inp_desc2 = ui.textarea("Descrição (opcional)").style("width:100%;")
                 lbl_doc_err = ui.label("").style("color:#ef4444; font-size:13px;")
 
-                def create_doc():
+                async def create_doc():
                     lbl_doc_err.set_text("")
-                    title = inp_title.value.strip()
+                    title = (inp_title.value or "").strip()
                     if not title:
-                        lbl_doc_err.set_text("Título é obrigatório.")
+                        lbl_doc_err.set_text("T?tulo ? obrigat?rio.")
                         return
                     try:
-                        doc = api.api_create_document(
-                            state.get_cookies(), project["id"], title, inp_desc2.value.strip()
+                        doc = await api.api_create_document_async(
+                            state.get_cookies(), project["id"], title, (inp_desc2.value or "").strip()
                         )
                         state.set_current_document(doc)
                         dlg_new_doc.close()
+                        await refresh_fn()
                         ui.navigate.to("/workspace")
                     except Exception as e:
+                        logger.exception("dashboard.document.create failed")
                         lbl_doc_err.set_text(f"Erro: {str(e)[:80]}")
 
                 with ui.row().style("gap:8px; margin-top:16px;"):

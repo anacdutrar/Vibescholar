@@ -63,9 +63,9 @@ async def page_dashboard():
 
 
 @ui.page("/workspace")
-def page_workspace():
+async def page_workspace():
     from app.ui.pages.workspace import workspace_page
-    workspace_page()
+    await workspace_page()
 
 
 @ui.page("/references")
