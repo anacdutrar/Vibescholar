@@ -15,11 +15,18 @@ def login_page() -> None:
     ui.add_head_html("""
     <style>
     .login-bg {
+      position:fixed;
+      inset:0;
+      width:100vw;
       min-height:100vh;
+      min-height:100dvh;
       background: radial-gradient(ellipse at 20% 50%, rgba(99,102,241,.15) 0%, transparent 60%),
                   radial-gradient(ellipse at 80% 20%, rgba(167,139,250,.1) 0%, transparent 50%),
                   #0f1117;
       display:flex; align-items:center; justify-content:center;
+      box-sizing:border-box;
+      padding:24px 16px;
+      overflow-y:auto;
     }
     .login-card {
       background: rgba(26,29,39,.9);
@@ -27,8 +34,14 @@ def login_page() -> None:
       border: 1px solid rgba(255,255,255,.08);
       border-radius: 20px;
       padding: 48px 40px;
-      width: 420px;
+      width:min(440px, calc(100vw - 32px));
+      max-width:440px;
+      box-sizing:border-box;
+      margin:auto;
       box-shadow: 0 24px 64px rgba(0,0,0,.5);
+    }
+    @media (max-width:520px) {
+      .login-card { padding:32px 24px; }
     }
     .logo-icon {
       width:52px; height:52px; border-radius:14px;

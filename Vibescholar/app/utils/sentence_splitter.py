@@ -14,10 +14,21 @@ _REFERENCE_HEADING = re.compile(
 _EDITORIAL_PREFIX = re.compile(
     r"^(?:received\b|accepted\b|published\b|date\s+of\s+publication\b|"
     r"date\s+of\s+current\s+version\b|copyright\b|©|ieee\b|acm\b|"
-    r"doi\s*:|index\s+terms?\b|keywords?\b)",
+    r"abnt\b|apa\b|authors?\b|affiliations?\b|funding\b|"
+    r"acknowledg(?:e)?ments?\b|doi\s*:|index\s+terms?\b|keywords?\b)",
     re.IGNORECASE,
 )
 _BARE_DOI = re.compile(r"^10\.\d{4,9}/\S+\s*$", re.IGNORECASE)
+_ENUMERATION_MARKER = re.compile(
+    r"^\s*(?:\d+[.)]|[ivxlcdm]+\.|[a-z]\))\s*", re.IGNORECASE
+)
+_BIBLIOGRAPHIC_ENTRY = re.compile(
+    r"^[A-ZÀ-Ý][A-ZÀ-Ý\s'’-]{2,},\s+[^.]{2,}\.\s+.+(?:19|20)\d{2}\.?s*$"
+)
+_NUMBERED_BIBLIOGRAPHIC_ENTRY = re.compile(
+    r"^(?:\[\d+(?:\s*[-,]\s*\d+)*\]|\d+\.)\s+.+(?:19|20)\d{2}\.?s*$",
+    re.IGNORECASE,
+)
 _TABLE_OR_FIGURE = re.compile(
     r"^(?:table\s+(?:\d+|[ivxlcdm]+)|fig(?:ure)?\.?\s*\d+)\b",
     re.IGNORECASE,
@@ -29,6 +40,20 @@ _KNOWN_SECTION_HEADING = re.compile(
     re.IGNORECASE,
 )
 
+_ABBREVIATIONS = (
+    "et al.", "Fig.", "Figs.", "Eq.", "Eqs.", "Ref.", "Refs.",
+    "No.", "Nos.", "Dr.", "Prof.", "Sr.", "Sra.", "Mr.", "Mrs.",
+    "Ms.", "Inc.", "Ltd.", "Co.", "Vol.", "pp.", "p.", "Ch.",
+    "Sec.", "Art.", "vs.", "etc.", "e.g.", "i.e.",
+)
+_ABBREVIATION_PATTERN = re.compile(
+    r"(?<!\w)(?:" + "|".join(
+        re.escape(item) for item in sorted(_ABBREVIATIONS, key=len, reverse=True)
+    ) + r")",
+    re.IGNORECASE,
+)
+_PROTECTED_PERIOD = "\ue000"
+
 
 def _clean_markdown_line(line: str) -> str:
     text = line.strip()
@@ -38,6 +63,28 @@ def _clean_markdown_line(line: str) -> str:
     text = re.sub(r"[*_~]+", "", text)
     text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
     return text.strip()
+
+
+def _protect_abbreviation_periods(text: str) -> str:
+    return _ABBREVIATION_PATTERN.sub(
+        lambda match: match.group(0).replace(".", _PROTECTED_PERIOD), text
+    )
+
+
+def _restore_abbreviation_periods(text: str) -> str:
+    return text.replace(_PROTECTED_PERIOD, ".")
+
+
+def _mask_enumeration_marker(line: str) -> tuple[str, bool]:
+    if _BARE_DOI.fullmatch(line.strip()):
+        return line, False
+    match = _ENUMERATION_MARKER.match(line)
+    if not match:
+        return line, False
+    remainder = line[match.end():]
+    if not remainder.strip():
+        return " " * len(line), True
+    return " " * match.end() + remainder, False
 
 
 def _is_mostly_symbols(text: str) -> bool:
@@ -79,6 +126,12 @@ def _is_non_analyzable_line(line: str) -> bool:
         return True
     if _BARE_DOI.fullmatch(cleaned):
         return True
+    if _ENUMERATION_MARKER.fullmatch(text):
+        return True
+    if _BIBLIOGRAPHIC_ENTRY.fullmatch(cleaned):
+        return True
+    if _NUMBERED_BIBLIOGRAPHIC_ENTRY.fullmatch(cleaned):
+        return True
     if _TABLE_OR_FIGURE.match(cleaned):
         return True
     return _is_short_heading(text, cleaned)
@@ -93,11 +146,12 @@ def filter_analyzable_content(content: str) -> str:
     filtered_lines = []
     inside_references = False
     for line in normalized.split("\n"):
-        cleaned = _clean_markdown_line(line)
+        analysis_line, marker_only = _mask_enumeration_marker(line)
+        cleaned = _clean_markdown_line(analysis_line)
         if _REFERENCE_HEADING.fullmatch(cleaned):
             inside_references = True
-        should_ignore = inside_references or _is_non_analyzable_line(line)
-        filtered_lines.append(" " * len(line) if should_ignore else line)
+        should_ignore = marker_only or inside_references or _is_non_analyzable_line(analysis_line)
+        filtered_lines.append(" " * len(line) if should_ignore else analysis_line)
     return "\n".join(filtered_lines)
 
 
@@ -143,14 +197,15 @@ def split_sentences(markdown_content: str) -> List[Dict[str, Any]]:
             continue
 
         paragraph_number += 1
-        para_stripped = para
+        para_stripped = _protect_abbreviation_periods(para)
         # Split sentences: punctuation (.!?), lookbehind, followed by spacing
         # Handles simple abbreviation exclusions by scanning common patterns
         raw_sentences = re.split(r'(?<!\bet)(?<!\bal)(?<!\beg)(?<!\bie)(?<=[.!?])\s+', para_stripped)
         
         sentence_number = 0
         para_offset = 0
-        for sent in raw_sentences:
+        for protected_sent in raw_sentences:
+            sent = _restore_abbreviation_periods(protected_sent)
             sent_cleaned = sent.strip()
             if not sent_cleaned:
                 continue

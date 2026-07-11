@@ -17,7 +17,7 @@ from app.models.reference import EvidenceSuggestion, ProjectReference
 from app.repositories.reference_repository import ReferenceRepository
 from app.schemas.request import UserCreate
 from app.ui import api_client
-from app.ui.pages import dashboard
+from app.ui.pages import dashboard, login
 from app.ui.pages.workspace import (
     QUILL_INIT_JS,
     _is_current_autosave_response,
@@ -977,3 +977,103 @@ def test_stale_autosave_response_is_ignored_without_editor_regression():
     assert _is_current_autosave_response(autosave_state, 1) is False
     assert _is_current_autosave_response(autosave_state, 2) is True
     assert "setQuillContent" not in inspect.getsource(_is_current_autosave_response)
+
+
+@pytest.mark.parametrize("text", [
+    "In [18], Taha et al. present an algorithm for surveillance.",
+    "The result in Fig. 2 confirms the hypothesis.",
+    "The results in Figs. 2 and 3 confirm the hypothesis.",
+    "Eq. 4 defines the objective function.",
+    "Eqs. 4 and 5 define the objective functions.",
+    "Ref. 8 describes the protocol.",
+    "Refs. 8 and 9 describe the protocol.",
+    "No. 4 identifies the experiment.",
+    "Nos. 4 and 5 identify the experiments.",
+    "Dr. Silva presents the method.",
+    "Prof. Silva presents the method.",
+    "Sr. Silva apresenta o método.",
+    "Sra. Silva apresenta o método.",
+    "Mr. Smith presents the method.",
+    "Mrs. Smith presents the method.",
+    "Ms. Smith presents the method.",
+    "Example Inc. develops the platform.",
+    "Example Ltd. develops the platform.",
+    "Example Co. develops the platform.",
+    "Vol. 4 contains the article.",
+    "See pp. 20-30 for the complete discussion.",
+    "See p. 15 for the complete discussion.",
+    "Ch. 3 presents the architecture.",
+    "Sec. 2 presents the architecture.",
+    "Art. 5 defines the requirement.",
+    "Method A vs. Method B produces different results.",
+    "The variables, etc. remain controlled.",
+    "Several methods, e.g. neural networks, were evaluated.",
+    "The values, i.e. the observed measurements, were recorded.",
+])
+def test_scientific_abbreviations_do_not_split_sentences(text):
+    sentences = split_sentences(text)
+    assert [item["text"] for item in sentences] == [text]
+
+
+@pytest.mark.parametrize("text", [
+    '"A internet mudou o mundo" (SILVA, 2024, p. 15).',
+    "The complete interval appears on pp. 20-30 and supports the result.",
+    "According to [18], the proposed method is effective.",
+    "According to [4,5], the proposed method is effective.",
+    "The proposed method (Author et al., 2022) is effective.",
+])
+def test_pagination_and_citations_remain_inside_sentence(text):
+    sentences = split_sentences(text)
+    assert [item["text"] for item in sentences] == [text]
+
+
+def test_bibliographic_and_editorial_blocks_are_not_analyzable():
+    content = """SILVA, João Alberto. A evolução da tecnologia. São Paulo: Editora Alfa, 2024.
+
+IEEE
+
+ACM
+
+ABNT
+
+APA
+
+Authors
+
+Affiliations
+
+Received April 24, 2018.
+
+Accepted May 23, 2018.
+
+Keywords: artificial intelligence
+
+Index Terms: surveillance
+
+Funding: Research grant 123.
+
+Acknowledgment: The authors thank the institution.
+
+DOI: 10.1234/example.2024"""
+
+    assert split_sentences(content) == []
+
+
+@pytest.mark.parametrize("marker", ["1.", "2.", "4)", "I.", "II.", "III.", "a)", "b)", "c)"])
+def test_enumeration_marker_does_not_create_isolated_paragraph(marker):
+    content = f"{marker}\n\nThe procedure improves scientific reproducibility."
+    sentences = split_sentences(content)
+    assert [item["text"] for item in sentences] == [
+        "The procedure improves scientific reproducibility."
+    ]
+    assert sentences[0]["paragraph_number"] == 1
+
+
+def test_login_card_is_centered_and_responsive():
+    source = inspect.getsource(login.login_page)
+    assert "position:fixed" in source
+    assert "inset:0" in source
+    assert "align-items:center; justify-content:center" in source
+    assert "width:min(440px, calc(100vw - 32px))" in source
+    assert "max-width:440px" in source
+    assert "margin:auto" in source
