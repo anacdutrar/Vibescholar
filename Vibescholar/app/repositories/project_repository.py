@@ -20,14 +20,26 @@ class ProjectRepository:
         ).order_by(Project.created_at.desc()).all()
 
     @staticmethod
+    def get_active_by_user_and_name(db: Session, user_id: int, name: str) -> Optional[Project]:
+        return db.query(Project).filter(
+            Project.user_id == user_id,
+            Project.name == name,
+            Project.deleted_at.is_(None)
+        ).first()
+
+    @staticmethod
     def create(db: Session, user_id: int, project_in: ProjectCreate) -> Project:
         db_project = Project(
             user_id=user_id,
-            name=project_in.name,
+            name=project_in.name.strip(),
             description=project_in.description
         )
         db.add(db_project)
-        db.commit()
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
         db.refresh(db_project)
         return db_project
 

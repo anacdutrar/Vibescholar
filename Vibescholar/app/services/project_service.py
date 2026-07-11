@@ -1,4 +1,6 @@
 from fastapi import Depends, HTTPException
+from fastapi import status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from app.core.database import get_db
@@ -23,8 +25,29 @@ class ProjectService:
         return ProjectRepository.list_by_user(self.db, user_id)
 
     def create_project(self, user_id: int, project_in: ProjectCreate) -> Project:
-        project = ProjectRepository.create(self.db, user_id, project_in)
-        ProjectSettingsRepository.create_default(self.db, project.id)
+        project_name = project_in.name.strip()
+        existing_project = ProjectRepository.get_active_by_user_and_name(self.db, user_id, project_name)
+        if existing_project:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Já existe um projeto com esse nome."
+            )
+
+        normalized_project = ProjectCreate(name=project_name, description=project_in.description)
+        try:
+            project = ProjectRepository.create(self.db, user_id, normalized_project)
+        except IntegrityError:
+            self.db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Já existe um projeto com esse nome."
+            )
+
+        try:
+            ProjectSettingsRepository.create_default(self.db, project.id)
+        except IntegrityError:
+            self.db.rollback()
+            raise
         return project
 
     def get_project(self, project_id: int, user_id: int) -> Project:

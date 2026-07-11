@@ -144,10 +144,16 @@ def login_page() -> None:
                                 tabs.value = tab_login
                             except httpx.HTTPStatusError as exc:
                                 logger.exception("Registration failed with HTTP status error")
-                                if exc.response.status_code == 400:
+                                if exc.response.status_code == 422:
+                                    try:
+                                        detail = exc.response.json().get("detail")
+                                    except ValueError:
+                                        detail = exc.response.text
+                                    lbl_reg_err.set_text(api.validation_error_message(detail))
+                                elif exc.response.status_code == 400:
                                     lbl_reg_err.set_text("Usuário já existe ou dados inválidos.")
                                 else:
-                                    lbl_reg_err.set_text(f"Erro no cadastro: {exc.response.status_code}")
+                                    lbl_reg_err.set_text("Não foi possível criar a conta. Verifique os dados.")
                             except Exception:
                                 logger.exception("Unexpected registration failure")
                                 lbl_reg_err.set_text("Não foi possível criar a conta. Tente novamente.")

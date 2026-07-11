@@ -3,7 +3,10 @@ VibeScholar – Dashboard Page
 ==============================
 Shows: project selector/creator, document list, grounding score summary.
 """
+import time
+import httpx
 from nicegui import ui
+from app.core.logging import logger
 from app.ui.components.layout import auth_guard, app_layout
 from app.ui import state
 from app.ui import api_client as api
@@ -38,26 +41,64 @@ def _project_selector(refresh_fn) -> None:
             ):
                 ui.label("Novo Projeto").style("font-size:18px; font-weight:700; color:#f0f2ff; margin-bottom:16px;")
                 inp_name = ui.input("Nome do projeto").style("width:100%;")
-                inp_desc = ui.textarea("Descrição (opcional)").style("width:100%;")
+                inp_desc = ui.textarea("Descri??o (opcional)").style("width:100%;")
                 lbl_err = ui.label("").style("color:#ef4444; font-size:13px;")
+                create_project_running = {"value": False}
 
-                def create_project():
-                    lbl_err.set_text("")
-                    name = inp_name.value.strip()
-                    if not name:
-                        lbl_err.set_text("Nome é obrigatório.")
+                async def create_project():
+                    start = time.perf_counter()
+                    logger.info("project.create callback start elapsed=%.4f", 0.0)
+                    if create_project_running["value"]:
+                        logger.warning("project.create duplicate callback ignored elapsed=%.4f", time.perf_counter() - start)
                         return
+                    create_project_running["value"] = True
+                    btn_create_project.disable()
+                    lbl_err.set_text("")
                     try:
-                        proj = api.api_create_project(state.get_cookies(), name, inp_desc.value.strip())
+                        name = (inp_name.value or "").strip()
+                        if not name:
+                            lbl_err.set_text("Nome ? obrigat?rio.")
+                            return
+                        description = (inp_desc.value or "").strip()
+                        logger.info(
+                            "project.create before api_create_project elapsed=%.4f url=%s",
+                            time.perf_counter() - start,
+                            f"{api.BASE_URL}/api/projects",
+                        )
+                        proj = await api.api_create_project_async(state.get_cookies(), name, description)
+                        logger.info("project.create before state update elapsed=%.4f", time.perf_counter() - start)
                         state.set_current_project(proj)
+                        logger.info("project.create after state update elapsed=%.4f", time.perf_counter() - start)
                         dlg_new_proj.close()
+                        logger.info("project.create before dashboard refresh elapsed=%.4f", time.perf_counter() - start)
                         refresh_fn()
+                        logger.info("project.create after dashboard refresh elapsed=%.4f", time.perf_counter() - start)
+                    except httpx.HTTPStatusError as e:
+                        logger.exception(
+                            "project.create HTTPStatusError type=%s status=%s body=%s",
+                            type(e).__name__,
+                            e.response.status_code,
+                            e.response.text,
+                        )
+                        if e.response.status_code == 409:
+                            message = "J? existe um projeto com esse nome."
+                            lbl_err.set_text(message)
+                            ui.notify(message, type="warning")
+                        else:
+                            lbl_err.set_text(f"Erro: {e.response.status_code}")
+                            ui.notify("N?o foi poss?vel criar o projeto.", type="negative")
                     except Exception as e:
+                        logger.exception("project.create exception type=%s timeout=%s", type(e).__name__, api.HTTP_TIMEOUT)
                         lbl_err.set_text(f"Erro: {str(e)[:80]}")
+                        ui.notify("N?o foi poss?vel criar o projeto.", type="negative")
+                    finally:
+                        btn_create_project.enable()
+                        create_project_running["value"] = False
+                        logger.info("project.create callback end elapsed=%.4f", time.perf_counter() - start)
 
                 with ui.row().style("gap:8px; margin-top:16px;"):
                     ui.button("Cancelar", on_click=dlg_new_proj.close).classes("vs-btn-ghost")
-                    ui.button("Criar Projeto", on_click=create_project).classes("vs-btn")
+                    btn_create_project = ui.button("Criar Projeto", on_click=create_project).classes("vs-btn")
 
             ui.button("+ Novo Projeto", on_click=dlg_new_proj.open).classes("vs-btn").style("font-size:13px; padding:6px 16px !important;")
 

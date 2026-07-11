@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, status
 from typing import List
 
+from app.core.logging import logger
 from app.routers.auth import get_current_user
 from app.schemas.request import ProjectCreate, ProjectUpdate, ProjectSettingsUpdate
 from app.schemas.response import ProjectOut, ProjectSettingsOut
@@ -27,6 +28,11 @@ def create_project(
     """
     Creates a new research project and initializes its default settings.
     """
+    logger.info(
+        "projects.create router reached user_id=%s payload=%s",
+        current_user.id,
+        {"name": project_in.name, "description": project_in.description}
+    )
     return project_service.create_project(current_user.id, project_in)
 
 @router.get("/api/projects/{project_id}", response_model=ProjectOut)

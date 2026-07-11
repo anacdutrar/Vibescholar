@@ -5,17 +5,58 @@ Handles HTTP calls to the FastAPI backend via httpx.
 Centralises authentication cookie management and error handling.
 """
 import os
+import time
 import httpx
 from typing import Optional, Any, Dict, List
+from app.core.logging import logger
 
 PORT = os.getenv("PORT", "8080")
 BASE_URL = os.getenv("API_BASE_URL") or f"http://127.0.0.1:{PORT}"
+HTTP_TIMEOUT = 30
 
 def _client(cookies: Optional[Dict[str, str]] = None) -> httpx.Client:
-    return httpx.Client(base_url=BASE_URL, cookies=cookies or {}, timeout=30)
+    return httpx.Client(base_url=BASE_URL, cookies=cookies or {}, timeout=HTTP_TIMEOUT)
 
 def _async_client(cookies: Optional[Dict[str, str]] = None) -> httpx.AsyncClient:
-    return httpx.AsyncClient(base_url=BASE_URL, cookies=cookies or {}, timeout=30)
+    return httpx.AsyncClient(base_url=BASE_URL, cookies=cookies or {}, timeout=HTTP_TIMEOUT)
+
+
+def register_payload(username: str, password: str, email: Optional[str] = None) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "username": username.strip(),
+        "password": password,
+    }
+    normalized_email = (email or "").strip()
+    if normalized_email:
+        payload["email"] = normalized_email
+    return payload
+
+
+def public_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: ("<omitted>" if key == "password" else value)
+        for key, value in payload.items()
+    }
+
+
+def validation_error_message(detail: Any) -> str:
+    if not isinstance(detail, list):
+        return str(detail)
+    messages = []
+    for item in detail:
+        loc = item.get("loc", []) if isinstance(item, dict) else []
+        field = str(loc[-1]) if loc else "campo"
+        error_type = item.get("type", "") if isinstance(item, dict) else ""
+        msg = item.get("msg", "") if isinstance(item, dict) else str(item)
+        if field == "email":
+            messages.append("E-mail inválido")
+        elif field == "password" and ("too_short" in error_type or "at least" in msg.lower()):
+            messages.append("Senha muito curta, min: 8")
+        elif "missing" in error_type:
+            messages.append("Campo obrigatório ausente")
+        else:
+            messages.append(msg)
+    return "; ".join(dict.fromkeys(messages)) or "Dados inválidos"
 
 
 # ─── AUTH ────────────────────────────────────────────────────────────────────
@@ -29,11 +70,12 @@ async def api_login(username: str, password: str) -> Dict[str, Any]:
 
 
 async def api_register(username: str, password: str, email: Optional[str] = None) -> Dict[str, Any]:
+    payload = register_payload(username, password, email)
+    logger.info("api_register payload=%s url=%s", public_payload(payload), f"{BASE_URL}/api/auth/register")
     async with _async_client() as c:
-        payload = {"username": username, "password": password}
-        if email:
-            payload["email"] = email
         r = await c.post("/api/auth/register", json=payload)
+        if r.status_code >= 400:
+            logger.warning("api_register status=%s body=%s", r.status_code, r.text)
         r.raise_for_status()
         return r.json()
 
@@ -55,6 +97,31 @@ def api_list_projects(cookies: Dict[str, str]) -> List[Dict]:
 def api_create_project(cookies: Dict[str, str], name: str, description: str = "") -> Dict:
     with _client(cookies) as c:
         r = c.post("/api/projects", json={"name": name, "description": description})
+        r.raise_for_status()
+        return r.json()
+
+
+async def api_create_project_async(cookies: Dict[str, str], name: str, description: str = "") -> Dict:
+    start = time.perf_counter()
+    url = f"{BASE_URL}/api/projects"
+    payload = {"name": name.strip(), "description": description}
+    logger.info(
+        "project.create api start elapsed=%.4f url=%s timeout=%s payload=%s",
+        time.perf_counter() - start,
+        url,
+        HTTP_TIMEOUT,
+        payload,
+    )
+    async with _async_client(cookies) as c:
+        logger.info("project.create before AsyncClient.post elapsed=%.4f url=%s", time.perf_counter() - start, url)
+        r = await c.post("/api/projects", json=payload)
+        logger.info(
+            "project.create response received elapsed=%.4f status=%s",
+            time.perf_counter() - start,
+            r.status_code,
+        )
+        if r.status_code >= 400:
+            logger.warning("project.create error response status=%s body=%s", r.status_code, r.text)
         r.raise_for_status()
         return r.json()
 

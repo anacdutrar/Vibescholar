@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, Response, Cookie, status
 from typing import Optional
+from app.core.logging import logger
 from app.schemas.request import UserCreate, UserLogin
 from app.schemas.response import UserOut
 from app.services.auth_service import AuthService, get_current_user_dep
@@ -11,6 +12,10 @@ def register(user_in: UserCreate, auth_service: AuthService = Depends()):
     """
     Registers a new user and hashes their password.
     """
+    logger.info(
+        "auth.register router reached payload=%s",
+        {"username": user_in.username, "email": user_in.email, "password": "<omitted>"}
+    )
     return auth_service.register(user_in)
 
 @router.post("/login", response_model=UserOut)

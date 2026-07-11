@@ -1,6 +1,8 @@
 import pytest
+import httpx
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
+from sqlalchemy.exc import PendingRollbackError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from app.core.database import Base, get_db
@@ -8,6 +10,8 @@ from app.app import fastapi_app
 from app.core.security import hash_password
 from app.models.user import User
 from app.models.document import DocumentVersion, Sentence
+from app.schemas.request import UserCreate
+from app.ui import api_client
 from app.utils.text_normalizer import normalize_text
 
 # StaticPool forces ALL connections to reuse the same single in-memory connection.
@@ -87,6 +91,75 @@ def test_auth_flow(client):
     assert logout_response.status_code == 200
     assert "session_username" not in logout_response.cookies
 
+def test_ui_register_payload_matches_user_create_schema():
+    payload = api_client.register_payload("  uiuser  ", "secret123", "  ui@example.com  ")
+    public_payload = api_client.public_payload(payload)
+
+    assert public_payload == {
+        "username": "uiuser",
+        "password": "<omitted>",
+        "email": "ui@example.com",
+    }
+    parsed = UserCreate(**payload)
+    assert parsed.username == "uiuser"
+    assert parsed.email == "ui@example.com"
+
+    payload_without_email = api_client.register_payload("uiuser2", "secret123", "   ")
+    assert payload_without_email == {"username": "uiuser2", "password": "secret123"}
+    parsed_without_email = UserCreate(**payload_without_email)
+    assert parsed_without_email.email is None
+
+def test_ui_validation_message_for_register_422_detail():
+    detail = [
+        {"loc": ["body", "email"], "type": "value_error", "msg": "value is not a valid email address"},
+        {"loc": ["body", "password"], "type": "string_too_short", "msg": "String should have at least 6 characters"},
+    ]
+    assert api_client.validation_error_message(detail) == "E-mail inválido; Senha muito curta"
+
+@pytest.mark.anyio
+async def test_api_create_project_async_uses_async_post(monkeypatch):
+    calls = []
+
+    class MockAsyncClient:
+        def __init__(self, base_url=None, cookies=None, timeout=None):
+            self.base_url = base_url
+            self.cookies = cookies
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, path, json):
+            calls.append({
+                "base_url": self.base_url,
+                "cookies": self.cookies,
+                "timeout": self.timeout,
+                "path": path,
+                "json": json,
+            })
+            request = httpx.Request("POST", f"{self.base_url}{path}")
+            return httpx.Response(
+                201,
+                json={"id": 1, "user_id": 1, "name": json["name"], "description": json["description"], "created_at": "2026-07-11T00:00:00"},
+                request=request,
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", MockAsyncClient)
+
+    result = await api_client.api_create_project_async({"session_username": "testuser"}, "  Meu projeto  ", "Desc")
+
+    assert result["name"] == "Meu projeto"
+    assert calls == [{
+        "base_url": api_client.BASE_URL,
+        "cookies": {"session_username": "testuser"},
+        "timeout": api_client.HTTP_TIMEOUT,
+        "path": "/api/projects",
+        "json": {"name": "Meu projeto", "description": "Desc"},
+    }]
+
 def test_project_document_flow(client):
     # Log in testuser
     client.post("/api/auth/login", json={
@@ -132,6 +205,53 @@ def test_project_document_flow(client):
     # Get updated document metadata
     updated_doc_res = client.get(f"/api/documents/{doc_id}")
     assert updated_doc_res.json()["current_version_id"] == new_version_id
+
+def test_duplicate_project_name_returns_409_and_session_remains_usable(client, db_session):
+    client.post("/api/auth/login", json={
+        "username": "testuser",
+        "password": "testpass123"
+    })
+
+    first_res = client.post("/api/projects", json={
+        "name": "Meu projeto",
+        "description": "Primeiro projeto"
+    })
+    assert first_res.status_code == 201
+
+    duplicate_res = client.post("/api/projects", json={
+        "name": "  Meu projeto  ",
+        "description": "Nome duplicado com espaços externos"
+    })
+    assert duplicate_res.status_code == 409
+    assert duplicate_res.json()["detail"] == "Já existe um projeto com esse nome."
+
+    try:
+        db_session.query(User).filter(User.username == "testuser").first()
+    except PendingRollbackError as exc:
+        pytest.fail(f"Session entered PendingRollbackError after duplicate project: {exc}")
+
+    another_res = client.post("/api/projects", json={
+        "name": "Outro projeto",
+        "description": "Projeto criado depois do conflito"
+    })
+    assert another_res.status_code == 201
+
+    register_res = client.post("/api/auth/register", json={
+        "username": "otheruser",
+        "password": "otherpass123",
+        "email": "other@vibescholar.org"
+    })
+    assert register_res.status_code == 201
+
+    client.post("/api/auth/login", json={
+        "username": "otheruser",
+        "password": "otherpass123"
+    })
+    same_name_other_user_res = client.post("/api/projects", json={
+        "name": "Meu projeto",
+        "description": "Mesmo nome para outro usuário"
+    })
+    assert same_name_other_user_res.status_code == 201
 
 def test_sentence_uuid_equivalence_matching(client, db_session):
     # Log in
