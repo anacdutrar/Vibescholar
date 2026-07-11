@@ -1,0 +1,55 @@
+# ==========================
+# Python
+# ==========================
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Ambientes virtuais
+.venv/
+venv/
+env/
+
+# ==========================
+# SQLite
+# ==========================
+
+# Arquivos temporários do SQLite
+*.db-shm
+*.db-wal
+*.db-journal
+
+# Se o banco NÃO deve ir para o Git, descomente:
+# *.db
+
+# ==========================
+# Logs
+# ==========================
+*.log
+startup_stdout.log
+startup_stderr.log
+
+# ==========================
+# VS Code
+# ==========================
+.vscode/
+
+# ==========================
+# Node / React / Vite
+# ==========================
+node_modules/
+dist/
+
+# ==========================
+# Sistema Operacional
+# ==========================
+.DS_Store
+Thumbs.db
+
+# ==========================
+# Variáveis de ambiente
+# ==========================
+.env
+.env.*
+!.env.example
