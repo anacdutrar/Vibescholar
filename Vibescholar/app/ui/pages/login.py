@@ -1,7 +1,10 @@
 """
-VibeScholar – Login & Register Page
+VibeScholar - Login & Register Page
 """
+import httpx
 from nicegui import ui
+
+from app.core.logging import logger
 from app.ui.styles import GLOBAL_CSS
 from app.ui import state
 from app.ui import api_client as api
@@ -33,19 +36,32 @@ def login_page() -> None:
       display:flex; align-items:center; justify-content:center;
       font-size:24px; margin:0 auto 16px;
     }
-    .tab-pill { display:flex; background:rgba(255,255,255,.05); border-radius:99px; padding:3px; margin-bottom:28px; }
-    .tab-pill-item {
-      flex:1; text-align:center; padding:8px 0;
-      border-radius:99px; font-size:14px; font-weight:600;
-      cursor:pointer; transition: all .2s; color:#8b90a0;
+    .login-tabs {
+      background:rgba(255,255,255,.05);
+      border-radius:99px;
+      padding:3px;
+      margin-bottom:28px;
+      color:#8b90a0;
     }
-    .tab-pill-item.active { background:#6366f1; color:#fff; }
+    .login-tabs .q-tab {
+      border-radius:99px;
+      min-height:36px;
+      font-size:14px;
+      font-weight:600;
+      text-transform:none;
+      color:#8b90a0;
+    }
+    .login-tabs .q-tab--active {
+      background:#6366f1;
+      color:#fff;
+    }
+    .login-tabs .q-tab__indicator { display:none; }
+    .login-panels .q-panel { overflow:visible; }
     </style>
     """)
 
     with ui.element("div").classes("login-bg"):
         with ui.element("div").classes("login-card fade-in"):
-            # Logo
             with ui.element("div").style("text-align:center; margin-bottom:8px"):
                 ui.element("div").classes("logo-icon").style("margin:0 auto 12px").add_slot(
                     "default", "<span>📚</span>"
@@ -61,96 +77,86 @@ def login_page() -> None:
 
             ui.separator().style("margin:24px 0; border-color:rgba(255,255,255,.06);")
 
-            # Tabs state
-            show_register = {"value": False}
+            with ui.tabs().classes("login-tabs").style("width:100%;") as tabs:
+                tab_login = ui.tab("Login")
+                tab_register = ui.tab("Cadastrar")
 
-            # Tab switcher
-            with ui.row().style(
-                "background:rgba(255,255,255,.05); border-radius:99px; padding:3px; margin-bottom:28px; gap:0;"
+            with ui.tab_panels(tabs, value=tab_login).classes("login-panels").style(
+                "width:100%; background:transparent; color:#f0f2ff;"
             ):
-                btn_login = ui.button("Entrar").style(
-                    "flex:1; border-radius:99px; font-weight:600; background:#6366f1; color:#fff; border:none; padding:8px 0;"
-                )
-                btn_register = ui.button("Cadastrar").style(
-                    "flex:1; border-radius:99px; font-weight:600; background:transparent; color:#8b90a0; border:none; padding:8px 0;"
-                )
+                with ui.tab_panel(tab_login).style("padding:0;"):
+                    with ui.column().style("width:100%; gap:14px;"):
+                        inp_username = ui.input("Usuário").style("width:100%;")
+                        inp_password = ui.input("Senha", password=True, password_toggle_button=True).style("width:100%;")
+                        lbl_error = ui.label("").style("color:#ef4444; font-size:13px; min-height:18px;")
 
-            # ── Login form ──────────────────────────────────
-            login_form = ui.column().style("width:100%; gap:14px;")
-            with login_form:
-                inp_username = ui.input("Usuário").style("width:100%;")
-                inp_password = ui.input("Senha", password=True, password_toggle_button=True).style("width:100%;")
-                lbl_error = ui.label("").style("color:#ef4444; font-size:13px; min-height:18px;")
+                        async def do_login():
+                            lbl_error.set_text("")
+                            username = (inp_username.value or "").strip()
+                            password = inp_password.value or ""
+                            if not username or not password:
+                                lbl_error.set_text("Preencha usuário e senha.")
+                                return
+                            try:
+                                user_data, cookies = await api.api_login(username, password)
+                                state.set_user(user_data)
+                                state.set_cookies(cookies)
+                                ui.notify("Login realizado com sucesso.", type="positive")
+                                ui.navigate.to("/dashboard")
+                            except httpx.HTTPStatusError as exc:
+                                logger.exception("Login failed with HTTP status error")
+                                if exc.response.status_code == 401:
+                                    lbl_error.set_text("Credenciais inválidas.")
+                                else:
+                                    lbl_error.set_text(f"Erro no login: {exc.response.status_code}")
+                            except Exception:
+                                logger.exception("Unexpected login failure")
+                                lbl_error.set_text("Não foi possível entrar. Tente novamente.")
 
-                def do_login():
-                    lbl_error.set_text("")
-                    u = inp_username.value.strip()
-                    p = inp_password.value
-                    if not u or not p:
-                        lbl_error.set_text("Preencha usuário e senha.")
-                        return
-                    try:
-                        user_data, cookies = api.api_login(u, p)
-                        state.set_user(user_data)
-                        state.set_cookies(cookies)
-                        ui.navigate.to("/dashboard")
-                    except Exception as e:
-                        detail = str(e)
-                        lbl_error.set_text("Credenciais inválidas." if "401" in detail else f"Erro: {detail[:80]}")
+                        ui.button("Entrar na plataforma", on_click=do_login).classes("vs-btn").style(
+                            "width:100%; margin-top:4px;"
+                        )
 
-                ui.button("Entrar na Plataforma", on_click=do_login).classes("vs-btn").style("width:100%; margin-top:4px;")
+                with ui.tab_panel(tab_register).style("padding:0;"):
+                    with ui.column().style("width:100%; gap:14px;"):
+                        inp_reg_user = ui.input("Nome de usuário").style("width:100%;")
+                        inp_reg_email = ui.input("E-mail (opcional)").style("width:100%;")
+                        inp_reg_pass = ui.input("Senha", password=True, password_toggle_button=True).style("width:100%;")
+                        lbl_reg_err = ui.label("").style("color:#ef4444; font-size:13px; min-height:18px;")
+                        lbl_reg_ok = ui.label("").style("color:#22c55e; font-size:13px; min-height:18px;")
 
-            # ── Register form ──────────────────────────────
-            reg_form = ui.column().style("width:100%; gap:14px;").bind_visibility_from(
-                show_register, "value"
-            )
-            reg_form.set_visibility(False)
+                        async def do_register():
+                            lbl_reg_err.set_text("")
+                            lbl_reg_ok.set_text("")
+                            username = (inp_reg_user.value or "").strip()
+                            email = (inp_reg_email.value or "").strip() or None
+                            password = inp_reg_pass.value or ""
+                            if not username or not password:
+                                lbl_reg_err.set_text("Usuário e senha são obrigatórios.")
+                                return
+                            try:
+                                await api.api_register(username, password, email)
+                                lbl_reg_ok.set_text("Conta criada. Faça login.")
+                                ui.notify("Conta criada com sucesso.", type="positive")
+                                inp_reg_user.value = ""
+                                inp_reg_email.value = ""
+                                inp_reg_pass.value = ""
+                                tabs.value = tab_login
+                            except httpx.HTTPStatusError as exc:
+                                logger.exception("Registration failed with HTTP status error")
+                                if exc.response.status_code == 400:
+                                    lbl_reg_err.set_text("Usuário já existe ou dados inválidos.")
+                                else:
+                                    lbl_reg_err.set_text(f"Erro no cadastro: {exc.response.status_code}")
+                            except Exception:
+                                logger.exception("Unexpected registration failure")
+                                lbl_reg_err.set_text("Não foi possível criar a conta. Tente novamente.")
 
-            with reg_form:
-                inp_reg_user = ui.input("Nome de usuário").style("width:100%;")
-                inp_reg_email = ui.input("E-mail (opcional)").style("width:100%;")
-                inp_reg_pass = ui.input("Senha", password=True, password_toggle_button=True).style("width:100%;")
-                lbl_reg_err = ui.label("").style("color:#ef4444; font-size:13px; min-height:18px;")
-                lbl_reg_ok = ui.label("").style("color:#22c55e; font-size:13px; min-height:18px;")
+                        ui.button("Criar conta", on_click=do_register).classes("vs-btn").style("width:100%;")
+                        ui.button("Voltar ao login", on_click=lambda: setattr(tabs, "value", tab_login)).classes(
+                            "vs-btn-ghost"
+                        ).style("width:100%;")
 
-                def do_register():
-                    lbl_reg_err.set_text("")
-                    lbl_reg_ok.set_text("")
-                    u = inp_reg_user.value.strip()
-                    em = inp_reg_email.value.strip() or None
-                    p = inp_reg_pass.value
-                    if not u or not p:
-                        lbl_reg_err.set_text("Usuário e senha são obrigatórios.")
-                        return
-                    try:
-                        api.api_register(u, p, em)
-                        lbl_reg_ok.set_text("Conta criada! Faça login.")
-                        inp_reg_user.value = ""
-                        inp_reg_email.value = ""
-                        inp_reg_pass.value = ""
-                    except Exception as e:
-                        detail = str(e)
-                        lbl_reg_err.set_text("Usuário já existe." if "400" in detail else f"Erro: {detail[:80]}")
-
-                ui.button("Criar Conta", on_click=do_register).classes("vs-btn").style("width:100%;")
-
-            # Tab switching callbacks
-            def switch_to_login():
-                login_form.set_visibility(True)
-                reg_form.set_visibility(False)
-                btn_login.style("background:#6366f1; color:#fff;")
-                btn_register.style("background:transparent; color:#8b90a0;")
-
-            def switch_to_register():
-                login_form.set_visibility(False)
-                reg_form.set_visibility(True)
-                btn_register.style("background:#6366f1; color:#fff;")
-                btn_login.style("background:transparent; color:#8b90a0;")
-
-            btn_login.on_click(switch_to_login)
-            btn_register.on_click(switch_to_register)
-
-            # Footer
             ui.separator().style("margin:24px 0; border-color:rgba(255,255,255,.06);")
             ui.label("© 2025 VibeScholar · Todos os direitos reservados").style(
                 "font-size:11px; color:#8b90a0; text-align:center; width:100%; display:block;"

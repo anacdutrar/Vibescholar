@@ -1,34 +1,39 @@
 """
 VibeScholar API Client
 ======================
-Handles all HTTP calls to the FastAPI backend via httpx.
+Handles HTTP calls to the FastAPI backend via httpx.
 Centralises authentication cookie management and error handling.
 """
+import os
 import httpx
 from typing import Optional, Any, Dict, List
 
-BASE_URL = "http://127.0.0.1:8080"
+PORT = os.getenv("PORT", "8080")
+BASE_URL = os.getenv("API_BASE_URL") or f"http://127.0.0.1:{PORT}"
 
 def _client(cookies: Optional[Dict[str, str]] = None) -> httpx.Client:
     return httpx.Client(base_url=BASE_URL, cookies=cookies or {}, timeout=30)
 
+def _async_client(cookies: Optional[Dict[str, str]] = None) -> httpx.AsyncClient:
+    return httpx.AsyncClient(base_url=BASE_URL, cookies=cookies or {}, timeout=30)
+
 
 # ─── AUTH ────────────────────────────────────────────────────────────────────
 
-def api_login(username: str, password: str) -> Dict[str, Any]:
+async def api_login(username: str, password: str) -> Dict[str, Any]:
     """Returns (user_data, cookies_dict) or raises."""
-    with _client() as c:
-        r = c.post("/api/auth/login", json={"username": username, "password": password})
+    async with _async_client() as c:
+        r = await c.post("/api/auth/login", json={"username": username, "password": password})
         r.raise_for_status()
         return r.json(), dict(r.cookies)
 
 
-def api_register(username: str, password: str, email: Optional[str] = None) -> Dict[str, Any]:
-    with _client() as c:
+async def api_register(username: str, password: str, email: Optional[str] = None) -> Dict[str, Any]:
+    async with _async_client() as c:
         payload = {"username": username, "password": password}
         if email:
             payload["email"] = email
-        r = c.post("/api/auth/register", json=payload)
+        r = await c.post("/api/auth/register", json=payload)
         r.raise_for_status()
         return r.json()
 
