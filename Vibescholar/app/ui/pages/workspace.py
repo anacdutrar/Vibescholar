@@ -31,6 +31,55 @@ SENTENCE_PAGE_SIZE = 10
 PARAGRAPH_SUMMARY_PAGE_SIZE = 25
 
 
+def _new_grounding_state(document_id: int | None = None) -> dict:
+    return {
+        "document_id": document_id,
+        "score": 0.0,
+        "supported_count": 0,
+        "unsupported_count": 0,
+        "outdated_count": 0,
+    }
+
+
+def _replace_grounding_state(
+    grounding_state: dict,
+    document_id: int,
+    summary: dict | None,
+) -> None:
+    updated = _new_grounding_state(document_id)
+    if summary:
+        updated.update(
+            score=float(summary.get("grounding_score") or 0.0),
+            supported_count=int(summary.get("supported_count") or 0),
+            unsupported_count=int(summary.get("unsupported_count") or 0),
+            outdated_count=int(summary.get("outdated_count") or 0),
+        )
+    grounding_state.clear()
+    grounding_state.update(updated)
+
+
+def _grounding_score(grounding_state: dict) -> float:
+    return float(grounding_state.get("score") or 0.0)
+
+
+def _apply_autosave_content(doc: dict, content: str) -> None:
+    doc["content"] = content
+
+
+async def _load_grounding_state(
+    grounding_state: dict,
+    cookies: dict,
+    document_id: int,
+) -> dict:
+    try:
+        summary = await api.api_get_grounding_summary_async(cookies, document_id)
+    except Exception:
+        logger.exception("workspace.grounding.load failed document_id=%s", document_id)
+        summary = {}
+    _replace_grounding_state(grounding_state, document_id, summary)
+    return grounding_state
+
+
 # ─── Quill helpers ────────────────────────────────────────────────────────────
 
 QUILL_CDN = """
@@ -136,7 +185,8 @@ async def _read_upload_file(uploaded_file) -> tuple[str, bytes]:
 def _detect_apparent_citation(text: str) -> dict | None:
     doi_match = re.search(r"\b10\.\d{4,9}/[^\s\]\)},;]+", text, re.IGNORECASE)
     author_year_match = re.search(
-        r"\(([A-ZÀ-ÖØ-Ý][\wÀ-ÿ'’-]+)(?:\s+et\s+al\.)?,\s*((?:19|20)\d{2})\)",
+        r"\(([A-ZÀ-ÖØ-Ý][\wÀ-ÿ'’-]+)(?:\s+et\s+al\.)?,\s*((?:19|20)\d{2})"
+        r"(?:,\s*pp?\.\s*\d+(?:\s*[-–]\s*\d+)?)?\)",
         text,
         re.IGNORECASE,
     )
@@ -169,6 +219,115 @@ def _reference_matches_citation(reference: dict, citation: dict) -> bool:
             and reference.get("year") == citation["year"]
         )
     return False
+
+
+def _matching_citation_suggestions(suggestions: list[dict], citation: dict) -> list[dict]:
+    return [
+        suggestion
+        for suggestion in suggestions
+        if suggestion.get("status") != "REJECTED"
+        and _reference_matches_citation(suggestion.get("reference") or {}, citation)
+    ]
+
+
+def _selectable_reference_suggestions(suggestions: list[dict]) -> list[dict]:
+    return [
+        suggestion
+        for suggestion in suggestions
+        if suggestion.get("status") != "REJECTED"
+        and suggestion.get("reference")
+        and (
+            suggestion["reference"].get("id") is not None
+            or suggestion.get("reference_id") is not None
+        )
+    ]
+
+
+async def _refresh_evidence_components(
+    sentence_id: int,
+    refresh_card,
+    refresh_grounding,
+) -> None:
+    await refresh_card()
+    await refresh_grounding()
+    logger.info(
+        "workspace.evidence.refresh sentence_id=%s card_refreshed=true grounding_refreshed=true",
+        sentence_id,
+    )
+
+
+def _citation_needs_review(sentence: dict, ignored_citations: set[int]) -> bool:
+    return (
+        _detect_apparent_citation(sentence.get("text", "")) is not None
+        and int(sentence.get("approved_evidence_count") or 0) == 0
+        and sentence["id"] not in ignored_citations
+    )
+
+
+def _sentence_evidence_action_label(sentence: dict, ignored_citations: set[int]) -> str:
+    if int(sentence.get("approved_evidence_count") or 0) > 0:
+        return "Ver evidências / Adicionar outra"
+    if _citation_needs_review(sentence, ignored_citations):
+        return "Revisar citação"
+    return "Buscar evidências"
+
+
+def _transition_citation_review_state(
+    sentence: dict,
+    new_state: str,
+    action: str,
+    reference_id: int | None = None,
+) -> None:
+    before = sentence.get("_citation_review_state", "DETECTED")
+    sentence["_citation_review_state"] = new_state
+    logger.info(
+        "workspace.citation.review sentence_id=%s citation_detected=%s reference_id=%s "
+        "action=%s state_before=%s state_after=%s",
+        sentence.get("id"),
+        _detect_apparent_citation(sentence.get("text", "")) is not None,
+        reference_id,
+        action,
+        before,
+        new_state,
+    )
+
+
+def _apply_evidence_status_locally(
+    sentence: dict,
+    suggestion: dict,
+    new_status: str,
+) -> None:
+    before_count = int(sentence.get("approved_evidence_count") or 0)
+    before_status = sentence.get("status", "UNVERIFIED")
+    previous_status = suggestion.get("status", "PENDING")
+    reference = suggestion.get("reference") or {}
+    title = reference.get("title")
+    titles = sentence.setdefault("approved_reference_titles", [])
+
+    if previous_status != "APPROVED" and new_status == "APPROVED":
+        sentence["approved_evidence_count"] = before_count + 1
+        if title and title not in titles:
+            titles.append(title)
+    elif previous_status == "APPROVED" and new_status != "APPROVED":
+        sentence["approved_evidence_count"] = max(0, before_count - 1)
+        if title in titles:
+            titles.remove(title)
+    else:
+        sentence["approved_evidence_count"] = before_count
+
+    suggestion["status"] = new_status
+    sentence.setdefault("_evidence_status_by_id", {})[suggestion["id"]] = new_status
+    after_count = int(sentence["approved_evidence_count"])
+    sentence["status"] = "SUPPORTED" if after_count > 0 else "UNVERIFIED"
+    logger.info(
+        "workspace.evidence.local_state sentence_id=%s evidence_before=%s evidence_after=%s "
+        "status_before=%s status_after=%s",
+        sentence.get("id"),
+        before_count,
+        after_count,
+        before_status,
+        sentence["status"],
+    )
 
 
 def _paragraph_key(sentence: dict) -> str:
@@ -312,7 +471,7 @@ async def _persist_content_before_version_locked(
         return await _persist_content_before_version(cookies, document_id, content)
 
 
-def _toolbar_row(doc: dict, refresh_fn) -> None:
+def _toolbar_row(doc: dict, refresh_fn, grounding_state: dict) -> None:
     """Top action bar above the editor."""
     async def save_version_click():
         await _save_version(doc, refresh_fn)
@@ -326,7 +485,7 @@ def _toolbar_row(doc: dict, refresh_fn) -> None:
             "white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"
         )
 
-        score = doc.get("grounding_score", 0.0)
+        score = _grounding_score(grounding_state)
         color = "#22c55e" if score >= 0.7 else ("#f59e0b" if score >= 0.4 else "#ef4444")
         ui.element("div").style(
             f"border:2px solid {color}; border-radius:50%; width:38px; height:38px; "
@@ -424,7 +583,7 @@ def _open_export_dialog(doc: dict) -> None:
                     link.click();
                     link.remove();
                 """)
-                ui.notify("Exporta??o iniciada.", type="positive")
+                ui.notify("Exportação iniciada.", type="positive")
                 dlg.close()
             except Exception as e:
                 ui.notify(f"Erro ao exportar: {str(e)[:80]}", type="negative")
@@ -529,22 +688,22 @@ async def _open_settings_dialog() -> None:
     try:
         settings = await api.api_get_project_settings_async(state.get_cookies(), project["id"])
     except Exception as e:
-        ui.notify(f"N?o foi poss?vel carregar configura??es: {str(e)[:80]}", type="negative")
+        ui.notify(f"Não foi possível carregar configurações: {str(e)[:80]}", type="negative")
 
     with ui.dialog() as dlg, ui.card().style(
         "background:#1a1d27; border:1px solid rgba(255,255,255,.08); border-radius:16px; padding:28px; min-width:480px;"
     ):
         ui.label("Configurações do Projeto").style("font-size:18px; font-weight:700; color:#f0f2ff; margin-bottom:20px;")
 
-        inp_lang = ui.select(["pt", "en", "es"], label="Idioma principal das refer?ncias", value=settings.get("preferred_language", "pt")).style("width:100%;")
+        inp_lang = ui.select(["pt", "en", "es"], label="Idioma principal das referências", value=settings.get("preferred_language", "pt")).style("width:100%;")
         inp_qualis = ui.select(["A1", "A2", "B1", "B2", "B3", "B4", "B5", "C"], label="Qualis mínimo", value=settings.get("minimum_qualis", "B1")).style("width:100%;")
         inp_year_min = ui.number("Ano mínimo de publicação", value=settings.get("publication_year_min"), min=1900, max=2030).style("width:100%;")
         inp_year_max = ui.number("Ano máximo de publicação", value=settings.get("publication_year_max"), min=1900, max=2030).style("width:100%;")
         inp_max_sug = ui.number("Máximo de sugestões", value=settings.get("max_suggestions", 5), min=1, max=20).style("width:100%;")
         inp_open_access = ui.checkbox("Somente acesso aberto", value=settings.get("only_open_access", False))
-        ui.label("Filtra artigos dispon?veis gratuitamente.").style("font-size:12px; color:#8b90a0; margin-top:-8px;")
+        ui.label("Filtra artigos disponíveis gratuitamente.").style("font-size:12px; color:#8b90a0; margin-top:-8px;")
         inp_prefer_doi = ui.checkbox("Preferir DOI", value=settings.get("prefer_doi", False))
-        ui.label("Prioriza refer?ncias que possuam identificador DOI.").style("font-size:12px; color:#8b90a0; margin-top:-8px;")
+        ui.label("Prioriza referências que possuam identificador DOI.").style("font-size:12px; color:#8b90a0; margin-top:-8px;")
         lbl_s_err = ui.label("").style("color:#ef4444; font-size:13px;")
 
         async def save_settings():
@@ -675,6 +834,8 @@ async def _right_panel(
     refresh_fn,
     persistence_lock: asyncio.Lock,
     autosave_state: dict,
+    grounding_state: dict,
+    sync_grounding_fn,
 ) -> None:
     """Right side panel: sentence list, evidence panel, version selector, grounding dashboard."""
     tabs = ui.tabs().style("margin-bottom:0; border-bottom:1px solid rgba(255,255,255,.07);")
@@ -682,6 +843,47 @@ async def _right_panel(
         t_sentences = ui.tab("Sentenças", icon="list")
         t_grounding = ui.tab("Grounding", icon="verified")
         t_history = ui.tab("Histórico", icon="history")
+
+    @ui.refreshable
+    def grounding_content() -> None:
+        if grounding_state.get("document_id") != doc.get("id"):
+            ui.label("Nenhum relatório disponível ainda.").style(
+                "font-size:13px; color:#8b90a0;"
+            )
+            return
+
+        score = _grounding_score(grounding_state)
+        color = "#22c55e" if score >= 0.7 else ("#f59e0b" if score >= 0.4 else "#ef4444")
+        with ui.element("div").style("text-align:center; margin-bottom:20px;"):
+            ui.element("div").style(
+                f"width:80px;height:80px;border-radius:50%;border:3px solid {color};"
+                f"display:flex;align-items:center;justify-content:center;"
+                f"font-size:22px;font-weight:800;color:{color};margin:0 auto 8px;"
+                f"background:rgba(0,0,0,.2);"
+            ).add_slot("default", f"<span>{int(score * 100)}%</span>")
+            ui.label("Score de Fundamentação").style("font-size:13px; color:#8b90a0;")
+
+        for label, key, col in [
+            ("Fundamentadas", "supported_count", "#22c55e"),
+            ("Não verificadas", "unsupported_count", "#f59e0b"),
+            ("Desatualizadas", "outdated_count", "#ef4444"),
+        ]:
+            with ui.row().style(
+                "justify-content:space-between; align-items:center; padding:10px 0; "
+                "border-bottom:1px solid rgba(255,255,255,.06);"
+            ):
+                with ui.row().style("align-items:center; gap:8px;"):
+                    ui.element("div").style(
+                        f"width:8px;height:8px;border-radius:50%;background:{col};"
+                    )
+                    ui.label(label).style("font-size:13px; color:#f0f2ff;")
+                ui.label(str(grounding_state.get(key, 0))).style(
+                    f"font-size:16px; font-weight:700; color:{col};"
+                )
+
+    async def refresh_grounding_views() -> None:
+        await sync_grounding_fn()
+        grounding_content.refresh()
 
     with ui.tab_panels(tabs, value=t_sentences).style("background:transparent; padding:16px 0;"):
         # ── Sentences panel ──────────────────────────────────────────────────
@@ -713,8 +915,81 @@ async def _right_panel(
                     view_state["filter"],
                 )
 
-                async def refresh_sentence_panel() -> None:
-                    sentence_cards.refresh()
+                def render_sentence_card(sent: dict) -> None:
+                    @ui.refreshable
+                    def sentence_card() -> None:
+                        status = sent.get("status", "UNVERIFIED")
+                        pill_cls = {
+                            "SUPPORTED": "pill-supported",
+                            "OUTDATED": "pill-outdated",
+                        }.get(status, "pill-unverified")
+                        pill_label = {
+                            "SUPPORTED": "Fundamentada",
+                            "OUTDATED": "Desatualizada",
+                        }.get(status, "Não verificada")
+                        approved_count = int(sent.get("approved_evidence_count") or 0)
+                        approved_titles = sent.get("approved_reference_titles") or []
+                        citation = _detect_apparent_citation(sent["text"])
+                        citation_needs_review = _citation_needs_review(sent, ignored_citations)
+
+                        async def refresh_card_and_grounding() -> None:
+                            async def refresh_card() -> None:
+                                sentence_card.refresh()
+
+                            await _refresh_evidence_components(
+                                sent["id"], refresh_card, refresh_grounding_views
+                            )
+
+                        with ui.element("div").style(
+                            "background:#212435; border:1px solid rgba(255,255,255,.07); border-radius:8px; "
+                            "padding:12px 14px; margin-bottom:8px;"
+                        ):
+                            with ui.row().style(
+                                "justify-content:space-between; align-items:flex-start; margin-bottom:8px; gap:8px;"
+                            ):
+                                ui.label(sent["text"][:120] + ("…" if len(sent["text"]) > 120 else "")).style(
+                                    "font-size:13px; color:#f0f2ff; flex:1; line-height:1.5;"
+                                )
+                                ui.element("span").classes(f"pill {pill_cls}").add_slot(
+                                    "default", f"<span>{pill_label}</span>"
+                                )
+
+                            if citation_needs_review:
+                                ui.label("Citação detectada — verificação necessária").style(
+                                    "font-size:11px; color:#f59e0b; margin-bottom:6px;"
+                                )
+                                ui.label(f"Padrão detectado: {citation['raw']}").style(
+                                    "font-size:11px; color:#d5d8e2; margin-bottom:6px;"
+                                )
+                            ui.label(f"{approved_count} evidência(s) aprovada(s)").style(
+                                "font-size:11px; color:#8b90a0;"
+                            )
+                            for title in approved_titles[:3]:
+                                ui.label(f"• {title[:80]}").style(
+                                    "font-size:11px; color:#b8bdcc; white-space:nowrap; "
+                                    "overflow:hidden; text-overflow:ellipsis; max-width:100%;"
+                                )
+
+                            async def search_ev() -> None:
+                                await _evidence_panel(sent, doc, refresh_card_and_grounding)
+
+                            async def review_citation() -> None:
+                                await _citation_review_dialog(
+                                    sent,
+                                    doc,
+                                    citation,
+                                    ignored_citations,
+                                    refresh_card_and_grounding,
+                                )
+
+                            action_label = _sentence_evidence_action_label(sent, ignored_citations)
+                            action_callback = review_citation if citation_needs_review else search_ev
+                            ui.button(action_label, on_click=action_callback).style(
+                                "background:rgba(99,102,241,.12); border:1px solid rgba(99,102,241,.25); "
+                                "color:#818cf8; border-radius:6px; font-size:11px; padding:4px 12px; margin-top:8px;"
+                            )
+
+                    sentence_card()
 
                 @ui.refreshable
                 def sentence_cards() -> None:
@@ -781,88 +1056,7 @@ async def _right_panel(
                         )
 
                     for sent in view["items"] if view["mode"] == "sentences" else []:
-                        status = sent.get("status", "UNVERIFIED")
-                        pill_cls = {
-                            "SUPPORTED": "pill-supported",
-                            "OUTDATED": "pill-outdated",
-                        }.get(status, "pill-unverified")
-                        pill_label = {
-                            "SUPPORTED": "Fundamentada",
-                            "OUTDATED": "Desatualizada",
-                        }.get(status, "Não verificada")
-                        approved_count = int(sent.get("approved_evidence_count") or 0)
-                        approved_titles = sent.get("approved_reference_titles") or []
-                        citation = _detect_apparent_citation(sent["text"])
-                        citation_needs_review = (
-                            citation is not None
-                            and approved_count == 0
-                            and sent["id"] not in ignored_citations
-                        )
-
-                        with ui.element("div").style(
-                            "background:#212435; border:1px solid rgba(255,255,255,.07); border-radius:8px; "
-                            "padding:12px 14px; margin-bottom:8px;"
-                        ):
-                            with ui.row().style(
-                                "justify-content:space-between; align-items:flex-start; margin-bottom:8px; gap:8px;"
-                            ):
-                                ui.label(sent["text"][:120] + ("…" if len(sent["text"]) > 120 else "")).style(
-                                    "font-size:13px; color:#f0f2ff; flex:1; line-height:1.5;"
-                                )
-                                ui.element("span").classes(f"pill {pill_cls}").add_slot(
-                                    "default", f"<span>{pill_label}</span>"
-                                )
-
-                            if citation_needs_review:
-                                ui.label("Citação detectada — verificação necessária").style(
-                                    "font-size:11px; color:#f59e0b; margin-bottom:6px;"
-                                )
-                                ui.label(f"Padrão detectado: {citation['raw']}").style(
-                                    "font-size:11px; color:#d5d8e2; margin-bottom:6px;"
-                                )
-                            ui.label(f"{approved_count} evidência(s) aprovada(s)").style(
-                                "font-size:11px; color:#8b90a0;"
-                            )
-                            for title in approved_titles[:3]:
-                                ui.label(f"• {title[:80]}").style(
-                                    "font-size:11px; color:#b8bdcc; white-space:nowrap; "
-                                    "overflow:hidden; text-overflow:ellipsis; max-width:100%;"
-                                )
-
-                            def make_search(s=sent):
-                                async def search_ev():
-                                    await _evidence_panel(s, doc, refresh_sentence_panel)
-                                return search_ev
-
-                            def make_review(s=sent, detected=citation):
-                                async def review_citation():
-                                    await _citation_review_dialog(
-                                        s,
-                                        doc,
-                                        detected,
-                                        ignored_citations,
-                                        refresh_sentence_panel,
-                                    )
-                                return review_citation
-
-                            action_label = (
-                                "Ver / adicionar evidências"
-                                if approved_count > 0
-                                else (
-                                    "Revisar citação detectada"
-                                    if citation_needs_review
-                                    else "Buscar evidências"
-                                )
-                            )
-                            action_callback = (
-                                make_review(sent, citation)
-                                if citation_needs_review
-                                else make_search(sent)
-                            )
-                            ui.button(action_label, on_click=action_callback).style(
-                                "background:rgba(99,102,241,.12); border:1px solid rgba(99,102,241,.25); "
-                                "color:#818cf8; border-radius:6px; font-size:11px; padding:4px 12px; margin-top:8px;"
-                            )
+                        render_sentence_card(sent)
 
                     if view["mode"] == "sentences" and view["total_pages"] > 1:
                         with ui.row().style(
@@ -917,37 +1111,7 @@ async def _right_panel(
 
         # ── Grounding dashboard ──────────────────────────────────────────────
         with ui.tab_panel(t_grounding):
-            summary = {}
-            try:
-                summary = await api.api_get_grounding_summary_async(state.get_cookies(), doc["id"])
-            except Exception:
-                summary = {}
-
-            if not summary:
-                ui.label("Nenhum relatório disponível ainda.").style("font-size:13px; color:#8b90a0;")
-            else:
-                score = summary.get("grounding_score", 0.0)
-                color = "#22c55e" if score >= 0.7 else ("#f59e0b" if score >= 0.4 else "#ef4444")
-
-                with ui.element("div").style("text-align:center; margin-bottom:20px;"):
-                    ui.element("div").style(
-                        f"width:80px;height:80px;border-radius:50%;border:3px solid {color};"
-                        f"display:flex;align-items:center;justify-content:center;"
-                        f"font-size:22px;font-weight:800;color:{color};margin:0 auto 8px;"
-                        f"background:rgba(0,0,0,.2);"
-                    ).add_slot("default", f"<span>{int(score*100)}%</span>")
-                    ui.label("Score de Fundamentação").style("font-size:13px; color:#8b90a0;")
-
-                for label, key, col in [
-                    ("Fundamentadas", "supported_count", "#22c55e"),
-                    ("Não verificadas", "unsupported_count", "#f59e0b"),
-                    ("Desatualizadas", "outdated_count", "#ef4444"),
-                ]:
-                    with ui.row().style(f"justify-content:space-between; align-items:center; padding:10px 0; border-bottom:1px solid rgba(255,255,255,.06);"):
-                        with ui.row().style("align-items:center; gap:8px;"):
-                            ui.element("div").style(f"width:8px;height:8px;border-radius:50%;background:{col};")
-                            ui.label(label).style("font-size:13px; color:#f0f2ff;")
-                        ui.label(str(summary.get(key, 0))).style(f"font-size:16px; font-weight:700; color:{col};")
+            grounding_content()
 
         # ── Version history ──────────────────────────────────────────────────
         with ui.tab_panel(t_history):
@@ -982,36 +1146,136 @@ async def _citation_review_dialog(
             )
             suggestions = []
 
-        matches = [
-            suggestion
-            for suggestion in suggestions
-            if _reference_matches_citation(suggestion.get("reference") or {}, citation)
-        ]
+        matches = _matching_citation_suggestions(suggestions, citation)
 
         if matches:
-            for suggestion in matches:
-                reference = suggestion.get("reference") or {}
-                with ui.element("div").style(
-                    "background:#212435; border:1px solid rgba(255,255,255,.07); "
-                    "border-radius:8px; padding:14px; margin-bottom:10px;"
-                ):
-                    ui.label(reference.get("title") or "Sem título").style(
-                        "font-size:14px; font-weight:700; color:#f0f2ff;"
-                    )
-                    ui.label(reference.get("authors") or "Autores não informados").style(
-                        "font-size:12px; color:#b8bdcc;"
-                    )
-                    ui.label(
-                        f"Ano: {reference.get('year') or 'não informado'} · "
-                        f"DOI: {reference.get('doi') or 'não informado'}"
-                    ).style("font-size:11px; color:#8b90a0; margin:4px 0 10px;")
+            suggestion = matches[0]
+            reference = suggestion.get("reference") or {}
+            reference_id = reference.get("id") or suggestion.get("reference_id")
+            _transition_citation_review_state(
+                sentence, "IN_REVIEW", "open", reference_id
+            )
+            with ui.element("div").style(
+                "background:#212435; border:1px solid rgba(255,255,255,.07); "
+                "border-radius:8px; padding:14px; margin-bottom:10px;"
+            ):
+                ui.label(reference.get("title") or "Sem título").style(
+                    "font-size:14px; font-weight:700; color:#f0f2ff;"
+                )
+                ui.label(reference.get("authors") or "Autores não informados").style(
+                    "font-size:12px; color:#b8bdcc;"
+                )
+                ui.label(
+                    f"Ano: {reference.get('year') or 'não informado'} · "
+                    f"DOI: {reference.get('doi') or 'não informado'}"
+                ).style("font-size:11px; color:#8b90a0; margin:4px 0 10px;")
 
-                    async def confirm_match(
-                        suggestion_id=suggestion["id"], matched_reference=reference
-                    ) -> None:
+            async def confirm_match() -> None:
+                try:
+                    previous_status = suggestion.get("status", "PENDING")
+                    updated = await api.api_update_suggestion_status_async(
+                        state.get_cookies(), suggestion["id"], "APPROVED"
+                    )
+                except Exception as exc:
+                    ui.notify(
+                        f"Erro ao confirmar evidência: {str(exc)[:80]}",
+                        type="negative",
+                    )
+                    return
+
+                suggestion.update(updated)
+                suggestion["reference"] = updated.get("reference") or reference
+                suggestion["status"] = previous_status
+                _apply_evidence_status_locally(sentence, suggestion, "APPROVED")
+                _transition_citation_review_state(
+                    sentence, "SUPPORTED", "confirm", reference_id
+                )
+                logger.info(
+                    "workspace.citation.confirm sentence_id=%s reference_selected=%s "
+                    "evidence_id=%s sentence_updated=true grounding_update=requested",
+                    sentence.get("id"),
+                    reference_id,
+                    suggestion.get("id"),
+                )
+                ui.notify("Citação confirmada como evidência.", type="positive")
+                dialog.close()
+                await refresh_sentence_panel()
+
+            async def reject_match() -> None:
+                try:
+                    previous_status = suggestion.get("status", "PENDING")
+                    updated = await api.api_update_suggestion_status_async(
+                        state.get_cookies(), suggestion["id"], "REJECTED"
+                    )
+                except Exception as exc:
+                    ui.notify(
+                        f"Erro ao rejeitar correspondência: {str(exc)[:80]}",
+                        type="negative",
+                    )
+                    return
+
+                suggestion.update(updated)
+                suggestion["reference"] = updated.get("reference") or reference
+                suggestion["status"] = previous_status
+                _apply_evidence_status_locally(sentence, suggestion, "REJECTED")
+                ignored_citations.add(sentence["id"])
+                _transition_citation_review_state(
+                    sentence, "REJECTED", "reject", reference_id
+                )
+                logger.info(
+                    "workspace.citation.reject sentence_id=%s reference_selected=%s "
+                    "evidence_id=%s sentence_updated=true grounding_update=requested",
+                    sentence.get("id"),
+                    reference_id,
+                    suggestion.get("id"),
+                )
+                ui.notify("Correspondência rejeitada.", type="info")
+                dialog.close()
+                await refresh_sentence_panel()
+
+            with ui.row().style("gap:8px; margin-top:16px; width:100%;"):
+                ui.button("Confirmar evidência", on_click=confirm_match).classes("vs-btn")
+                ui.button("Não corresponde", on_click=reject_match).classes("vs-btn-ghost")
+        else:
+            _transition_citation_review_state(sentence, "IN_REVIEW", "open", None)
+            ui.label("Nenhuma referência correspondente encontrada na biblioteca").style(
+                "font-size:13px; color:#b8bdcc; margin-bottom:10px;"
+            )
+            selectable = _selectable_reference_suggestions(suggestions)
+            if selectable:
+                with ui.column().style("width:100%; gap:10px;") as reference_picker:
+                    reference_options = {
+                        str(item["id"]): (
+                            f"{item['reference'].get('title') or 'Sem título'} — "
+                            f"{item['reference'].get('authors') or 'Autores não informados'}"
+                        )
+                        for item in selectable
+                    }
+                    selected_reference = ui.select(
+                        options=reference_options,
+                        label="Referência da biblioteca",
+                    ).style("width:100%;")
+
+                    async def confirm_selected_reference() -> None:
+                        if not selected_reference.value:
+                            ui.notify("Selecione uma referência.", type="warning")
+                            return
+                        selected = next(
+                            item
+                            for item in selectable
+                            if str(item["id"]) == str(selected_reference.value)
+                        )
+                        reference = selected.get("reference") or {}
+                        reference_id = reference.get("id") or selected.get("reference_id")
+                        logger.info(
+                            "workspace.citation.reference_selected sentence_id=%s reference_id=%s",
+                            sentence.get("id"),
+                            reference_id,
+                        )
                         try:
-                            await api.api_update_suggestion_status_async(
-                                state.get_cookies(), suggestion_id, "APPROVED"
+                            previous_status = selected.get("status", "PENDING")
+                            updated = await api.api_update_suggestion_status_async(
+                                state.get_cookies(), selected["id"], "APPROVED"
                             )
                         except Exception as exc:
                             ui.notify(
@@ -1020,83 +1284,101 @@ async def _citation_review_dialog(
                             )
                             return
 
-                        titles = sentence.setdefault("approved_reference_titles", [])
-                        title = matched_reference.get("title")
-                        if title and title not in titles:
-                            titles.append(title)
-                        sentence["approved_evidence_count"] = len(titles) or 1
-                        sentence["status"] = "SUPPORTED"
-                        ui.notify("Citação confirmada como evidência.", type="positive")
+                        selected.update(updated)
+                        selected["reference"] = updated.get("reference") or reference
+                        selected["status"] = previous_status
+                        _apply_evidence_status_locally(sentence, selected, "APPROVED")
+                        _transition_citation_review_state(
+                            sentence, "SUPPORTED", "manual_confirm", reference_id
+                        )
+                        logger.info(
+                            "workspace.citation.manual_confirm sentence_id=%s reference_selected=%s "
+                            "evidence_id=%s sentence_updated=true grounding_update=requested",
+                            sentence.get("id"),
+                            reference_id,
+                            selected.get("id"),
+                        )
+                        ui.notify("Referência confirmada como evidência.", type="positive")
                         dialog.close()
                         await refresh_sentence_panel()
 
                     ui.button(
-                        "Confirmar como evidência", on_click=confirm_match
-                    ).classes("vs-btn").style("font-size:12px;")
-        else:
-            ui.label("Nenhuma referência correspondente encontrada na biblioteca").style(
-                "font-size:13px; color:#b8bdcc; margin-bottom:10px;"
-            )
+                        "Confirmar evidência", on_click=confirm_selected_reference
+                    ).classes("vs-btn")
+                reference_picker.set_visibility(False)
 
-            async def search_suggestions() -> None:
-                dialog.close()
-                await _evidence_panel(sentence, doc, refresh_sentence_panel)
+                def show_reference_picker() -> None:
+                    reference_picker.set_visibility(True)
 
-            ui.button("Buscar sugestões", on_click=search_suggestions).classes("vs-btn")
-
-        async def ignore_citation() -> None:
-            ignored_citations.add(sentence["id"])
-            dialog.close()
-            await refresh_sentence_panel()
-
-        with ui.row().style("gap:8px; margin-top:16px; width:100%;"):
-            ui.button("Ignorar citação detectada", on_click=ignore_citation).classes("vs-btn-ghost")
-            ui.button("Fechar", on_click=dialog.close).classes("vs-btn-ghost")
+                ui.button("Buscar referências", on_click=show_reference_picker).classes(
+                    "vs-btn-ghost"
+                )
+            else:
+                ui.label("Nenhuma referência disponível para confirmação.").style(
+                    "font-size:12px; color:#8b90a0;"
+                )
     dialog.open()
 
 
 async def _evidence_panel(sentence: dict, doc: dict, refresh_fn) -> None:
     """Opens evidence suggestions dialog for a sentence."""
+    suggestions_state = {"items": [], "error": None}
+    try:
+        suggestions_state["items"] = await api.api_search_evidence_async(
+            state.get_cookies(), sentence["id"]
+        )
+    except Exception as exc:
+        suggestions_state["error"] = str(exc)[:80]
+
     with ui.dialog() as dlg, ui.card().style(
         "background:#1a1d27; border:1px solid rgba(255,255,255,.08); border-radius:16px; "
         "padding:28px; min-width:600px; max-width:700px;"
     ):
-        ui.label("Sugest?es de Evid?ncia").style("font-size:18px; font-weight:700; color:#f0f2ff;")
+        ui.label("Sugestões de Evidência").style("font-size:18px; font-weight:700; color:#f0f2ff;")
         ui.label(f'"{sentence["text"][:100]}?"').style(
             "font-size:13px; color:#8b90a0; margin-top:4px; margin-bottom:20px; font-style:italic;"
         )
 
         @ui.refreshable
-        async def evidence_content():
-            try:
-                suggestions = await api.api_search_evidence_async(state.get_cookies(), sentence["id"])
-            except Exception as e:
-                ui.label(f"Erro ao buscar evid?ncias: {str(e)[:80]}").style("font-size:13px; color:#ef4444;")
+        def evidence_content() -> None:
+            if suggestions_state["error"]:
+                ui.label(f"Erro ao buscar evidências: {suggestions_state['error']}").style("font-size:13px; color:#ef4444;")
                 return
 
+            suggestions = suggestions_state["items"]
             approved = [s for s in suggestions if s.get("status") == "APPROVED"]
             pending = [s for s in suggestions if s.get("status", "PENDING") == "PENDING"]
             rejected = [s for s in suggestions if s.get("status") == "REJECTED"]
 
             if approved:
-                ui.label("Refer?ncias aprovadas").style("font-size:13px; font-weight:700; color:#22c55e;")
-                _render_suggestions(approved, refresh_fn, evidence_content.refresh)
+                ui.label("Referências aprovadas").style("font-size:13px; font-weight:700; color:#22c55e;")
+                _render_suggestions(approved, sentence, refresh_fn, evidence_content.refresh)
             if pending:
-                ui.label("Sugest?es pendentes").style("font-size:13px; font-weight:700; color:#f0f2ff; margin-top:10px;")
-                _render_suggestions(pending, refresh_fn, evidence_content.refresh)
+                ui.label("Sugestões pendentes").style("font-size:13px; font-weight:700; color:#f0f2ff; margin-top:10px;")
+                _render_suggestions(pending, sentence, refresh_fn, evidence_content.refresh)
             if not pending:
-                ui.button("Buscar mais sugest?es", on_click=evidence_content.refresh).classes("vs-btn-ghost").style("margin-top:8px;")
-            if not suggestions:
-                ui.label("Nenhuma sugest?o encontrada para esta senten?a.").style("font-size:14px; color:#8b90a0;")
-            if rejected:
-                ui.label(f"{len(rejected)} sugest?o(?es) rejeitada(s).").style("font-size:12px; color:#8b90a0; margin-top:8px;")
+                async def search_more() -> None:
+                    try:
+                        suggestions_state["items"] = await api.api_search_evidence_async(
+                            state.get_cookies(), sentence["id"]
+                        )
+                        suggestions_state["error"] = None
+                    except Exception as exc:
+                        suggestions_state["error"] = str(exc)[:80]
+                    evidence_content.refresh()
 
-        await evidence_content()
+                ui.button("Buscar mais sugestões", on_click=search_more).classes("vs-btn-ghost").style("margin-top:8px;")
+            if not suggestions:
+                ui.label("Nenhuma sugestão encontrada para esta sentença.").style("font-size:14px; color:#8b90a0;")
+            if rejected:
+                ui.label(f"{len(rejected)} sugestão(ões) rejeitada(s).").style("font-size:12px; color:#8b90a0; margin-top:8px;")
+
+        evidence_content()
         ui.button("Fechar", on_click=dlg.close).classes("vs-btn-ghost").style("width:100%; margin-top:16px;")
     dlg.open()
 
 
-def _render_suggestions(suggestions: list, refresh_fn, evidence_refresh_fn) -> None:
+def _render_suggestions(suggestions: list, sentence: dict, refresh_fn, evidence_refresh_fn) -> None:
     for sug in suggestions:
         ref = sug.get("reference", {})
         status = sug.get("status", "PENDING")
@@ -1109,7 +1391,7 @@ def _render_suggestions(suggestions: list, refresh_fn, evidence_refresh_fn) -> N
         ):
             with ui.row().style("justify-content:space-between; align-items:flex-start; gap:12px;"):
                 with ui.column().style("flex:1; gap:4px; min-width:0;"):
-                    ui.label(ref.get("title", "Sem t?tulo")).style("font-size:14px; font-weight:700; color:#f0f2ff;")
+                    ui.label(ref.get("title", "Sem título")).style("font-size:14px; font-weight:700; color:#f0f2ff;")
                     ui.label(ref.get("authors", "")).style("font-size:12px; color:#8b90a0;")
                     with ui.row().style("gap:6px; flex-wrap:wrap; margin-top:4px;"):
                         if ref.get("journal"):
@@ -1130,20 +1412,31 @@ def _render_suggestions(suggestions: list, refresh_fn, evidence_refresh_fn) -> N
 
             if status == "PENDING":
                 with ui.row().style("gap:8px; margin-top:12px;"):
-                    async def approve(sid=sug["id"]):
+                    async def approve(current=sug):
                         try:
-                            await api.api_update_suggestion_status_async(state.get_cookies(), sid, "APPROVED")
-                            ui.notify("Evid?ncia aprovada!", type="positive")
-                            await evidence_refresh_fn()
+                            updated = await api.api_update_suggestion_status_async(
+                                state.get_cookies(), current["id"], "APPROVED"
+                            )
+                            current.update(updated)
+                            current["status"] = "PENDING"
+                            _apply_evidence_status_locally(sentence, current, "APPROVED")
+                            ui.notify("Evidência aprovada!", type="positive")
+                            evidence_refresh_fn()
                             await refresh_fn()
                         except Exception as e:
                             ui.notify(f"Erro: {str(e)[:60]}", type="negative")
 
-                    async def reject(sid=sug["id"]):
+                    async def reject(current=sug):
                         try:
-                            await api.api_update_suggestion_status_async(state.get_cookies(), sid, "REJECTED")
-                            ui.notify("Evid?ncia rejeitada.", type="info")
-                            await evidence_refresh_fn()
+                            updated = await api.api_update_suggestion_status_async(
+                                state.get_cookies(), current["id"], "REJECTED"
+                            )
+                            current.update(updated)
+                            current["status"] = "PENDING"
+                            _apply_evidence_status_locally(sentence, current, "REJECTED")
+                            ui.notify("Evidência rejeitada.", type="info")
+                            evidence_refresh_fn()
+                            await refresh_fn()
                         except Exception as e:
                             ui.notify(f"Erro: {str(e)[:60]}", type="negative")
 
@@ -1155,6 +1448,24 @@ def _render_suggestions(suggestions: list, refresh_fn, evidence_refresh_fn) -> N
                         "background:#7f1d1d22; border:1px solid #ef444455; color:#ef4444; "
                         "border-radius:6px; font-size:12px; padding:6px 14px;"
                     )
+            elif status == "APPROVED":
+                async def remove_approval(current=sug):
+                    try:
+                        updated = await api.api_update_suggestion_status_async(
+                            state.get_cookies(), current["id"], "PENDING"
+                        )
+                        current.update(updated)
+                        current["status"] = "APPROVED"
+                        _apply_evidence_status_locally(sentence, current, "PENDING")
+                        ui.notify("Aprovação removida.", type="info")
+                        evidence_refresh_fn()
+                        await refresh_fn()
+                    except Exception as exc:
+                        ui.notify(f"Erro: {str(exc)[:60]}", type="negative")
+
+                ui.button("Remover aprovação", on_click=remove_approval).classes(
+                    "vs-btn-ghost"
+                ).style("font-size:12px; margin-top:12px;")
 
 def _document_selector(refresh_fn, docs: list[dict]) -> None:
     """Document selector dropdown in the toolbar area."""
@@ -1168,12 +1479,12 @@ def _document_selector(refresh_fn, docs: list[dict]) -> None:
     current_doc = state.get_current_document()
     current_val = str(current_doc.get("id", "")) if current_doc else ""
 
-    def on_select(e):
+    async def on_select(e):
         selected_id = int(e.value)
         for d in docs:
             if d["id"] == selected_id:
                 state.set_current_document(d)
-                ui.navigate.to("/workspace")
+                await refresh_fn(d)
                 break
 
     ui.select(
@@ -1195,6 +1506,9 @@ async def workspace_page() -> None:
 
     doc = state.get_current_document()
     project = state.get_current_project()
+    grounding_state = _new_grounding_state(doc.get("id") if doc else None)
+    if doc and doc.get("id"):
+        await _load_grounding_state(grounding_state, state.get_cookies(), doc["id"])
     project_docs = []
     if project:
         try:
@@ -1211,14 +1525,39 @@ async def workspace_page() -> None:
     }
     save_operation = {"running": False}
 
-    async def refresh_analysis_panel() -> None:
+    async def sync_grounding_state() -> None:
+        if not doc or not doc.get("id"):
+            _replace_grounding_state(grounding_state, 0, {})
+        else:
+            before = dict(grounding_state)
+            await _load_grounding_state(
+                grounding_state, state.get_cookies(), doc["id"]
+            )
+            logger.info(
+                "workspace.grounding.sync document_id=%s score_before=%.4f score_after=%.4f",
+                doc["id"],
+                before.get("score", 0.0),
+                grounding_state["score"],
+            )
+        grounding_indicator.refresh()
+
+    async def refresh_analysis_panel(selected_doc: dict | None = None) -> None:
         nonlocal doc
+        if selected_doc is not None:
+            doc = selected_doc
+            state.set_current_document(doc)
+            _replace_grounding_state(grounding_state, doc["id"], {})
         if doc and doc.get("id"):
             try:
                 doc = await api.api_get_document_async(state.get_cookies(), doc["id"])
                 state.set_current_document(doc)
             except Exception:
                 ui.notify("Não foi possível atualizar o documento.", type="negative")
+        await sync_grounding_state()
+        if selected_doc is not None:
+            await ui.run_javascript(
+                f"setQuillContent({json.dumps(doc.get('content') or '')})"
+            )
         await right_panel_content.refresh()
 
     with ui.row().style("width:100%; min-height:100vh; gap:0; background:#0f1117;"):
@@ -1256,13 +1595,19 @@ async def workspace_page() -> None:
                 _document_selector(refresh_analysis_panel, project_docs)
                 ui.element("div").style("flex:1;")
 
-                score = doc.get("grounding_score", 0.0)
-                color = "#22c55e" if score >= 0.7 else ("#f59e0b" if score >= 0.4 else "#ef4444")
-                ui.element("div").style(
-                    f"border:2px solid {color}; border-radius:50%; width:38px; height:38px; "
-                    f"display:flex; align-items:center; justify-content:center; "
-                    f"font-size:11px; font-weight:700; color:{color};"
-                ).add_slot("default", f"<span>{int(score*100)}%</span>")
+                @ui.refreshable
+                def grounding_indicator() -> None:
+                    score = _grounding_score(grounding_state)
+                    color = "#22c55e" if score >= 0.7 else ("#f59e0b" if score >= 0.4 else "#ef4444")
+                    ui.element("div").props(
+                        'title="Score referente à versão atual analisada."'
+                    ).style(
+                        f"border:2px solid {color}; border-radius:50%; width:38px; height:38px; "
+                        f"display:flex; align-items:center; justify-content:center; "
+                        f"font-size:11px; font-weight:700; color:{color};"
+                    ).add_slot("default", f"<span>{int(score * 100)}%</span>")
+
+                grounding_indicator()
 
                 async def save_version_click():
                     await _save_version(
@@ -1333,7 +1678,7 @@ async def workspace_page() -> None:
                                     )
                                     return
                                 autosave_state["latest_completed"] = revision
-                                doc["content"] = new_content
+                                _apply_autosave_content(doc, new_content)
                                 save_status.set_text("Rascunho salvo")
                                 logger.info(
                                     "quill.autosave end document_id=%s revision=%s status=success",
@@ -1363,6 +1708,8 @@ async def workspace_page() -> None:
                             refresh_analysis_panel,
                             persistence_lock,
                             autosave_state,
+                            grounding_state,
+                            sync_grounding_state,
                         )
 
                     await right_panel_content()

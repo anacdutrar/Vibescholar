@@ -36,5 +36,13 @@ def get_current_document() -> dict:
 def set_current_document(doc: dict) -> None:
     ngapp.storage.user["current_document"] = doc
 
+def clear_project_context(project_id: int | None = None) -> bool:
+    current = get_current_project()
+    if project_id is not None and current.get("id") != project_id:
+        return False
+    set_current_project({})
+    set_current_document({})
+    return True
+
 def clear_session() -> None:
     ngapp.storage.user.clear()

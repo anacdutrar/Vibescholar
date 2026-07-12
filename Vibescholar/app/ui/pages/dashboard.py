@@ -60,7 +60,7 @@ def _project_selector(
             ):
                 ui.label("Novo Projeto").style("font-size:18px; font-weight:700; color:#f0f2ff; margin-bottom:16px;")
                 inp_name = ui.input("Nome do projeto").style("width:100%;")
-                inp_desc = ui.textarea("Descri??o (opcional)").style("width:100%;")
+                inp_desc = ui.textarea("Descrição (opcional)").style("width:100%;")
                 lbl_err = ui.label("").style("color:#ef4444; font-size:13px;")
                 create_project_running = {"value": False}
 
@@ -77,7 +77,7 @@ def _project_selector(
                     try:
                         name = (inp_name.value or "").strip()
                         if not name:
-                            lbl_err.set_text("Nome ? obrigat?rio.")
+                            lbl_err.set_text("Nome é obrigatório.")
                             return
                         description = (inp_desc.value or "").strip()
                         logger.info(
@@ -114,11 +114,11 @@ def _project_selector(
                             ui.notify(message, type="warning")
                         else:
                             lbl_err.set_text(f"Erro: {e.response.status_code}")
-                            ui.notify("N?o foi poss?vel criar o projeto.", type="negative")
+                            ui.notify("Não foi possível criar o projeto.", type="negative")
                     except Exception as e:
                         logger.exception("project.create exception type=%s timeout=%s", type(e).__name__, api.HTTP_TIMEOUT)
                         lbl_err.set_text(f"Erro: {str(e)[:80]}")
-                        ui.notify("N?o foi poss?vel criar o projeto.", type="negative")
+                        ui.notify("Não foi possível criar o projeto.", type="negative")
                     finally:
                         if not refresh_started:
                             btn_create_project.enable()
@@ -214,7 +214,7 @@ def _document_list(refresh_fn, docs: list[dict] | None = None) -> None:
                     lbl_doc_err.set_text("")
                     title = (inp_title.value or "").strip()
                     if not title:
-                        lbl_doc_err.set_text("T?tulo ? obrigat?rio.")
+                        lbl_doc_err.set_text("Título é obrigatório.")
                         return
                     try:
                         doc = await api.api_create_document_async(
@@ -398,7 +398,7 @@ async def dashboard_page() -> None:
                 projects = await api.api_list_projects_async(state.get_cookies())
             except Exception:
                 logger.exception("dashboard.projects.load failed")
-                ui.notify("N?o foi poss?vel carregar seus projetos.", type="negative")
+                ui.notify("Não foi possível carregar seus projetos.", type="negative")
 
             project = _select_valid_current_project(projects)
             docs = []
@@ -485,13 +485,28 @@ async def dashboard_page() -> None:
                 project_delete_dialog.close()
                 project_pending_delete["project"] = None
                 restored_project_names.add(project["name"].strip())
-                if state.get_current_project().get("id") == project["id"]:
-                    state.set_current_project({})
-                    state.set_current_document({})
+                current_before = state.get_current_project()
+                context_cleared = state.clear_project_context(project["id"])
+                current_after = state.get_current_project()
+                logger.info(
+                    "project.delete.state project_id=%s current_project_before=%s "
+                    "current_project_after=%s current_document_after=%s",
+                    project.get("id"),
+                    current_before.get("id") if current_before else None,
+                    current_after.get("id") if current_after else None,
+                    state.get_current_document().get("id") if state.get_current_document() else None,
+                )
+                if context_cleared:
+                    await ui.run_javascript(
+                        "document.getElementById('current-project-chip')?.remove();"
+                    )
                 ui.notify("Projeto excluído.", type="positive")
                 logger.info("project.delete.refresh start project_id=%s", project.get("id"))
                 await dashboard_content.refresh()
-                logger.info("project.delete.refresh end project_id=%s", project.get("id"))
+                logger.info(
+                    "project.delete.refresh end project_id=%s refresh_executed=true",
+                    project.get("id"),
+                )
 
             with ui.row().style("gap:8px; margin-top:16px;"):
                 ui.button("Cancelar", on_click=cancel_project_delete).classes("vs-btn-ghost")

@@ -69,13 +69,13 @@ async def references_page() -> None:
         try:
             refs = await api.api_list_references_async(state.get_cookies(), project["id"])
         except Exception as e:
-            ui.notify(f"N?o foi poss?vel carregar refer?ncias: {str(e)[:80]}", type="negative")
+            ui.notify(f"Não foi possível carregar referências: {str(e)[:80]}", type="negative")
 
         async def refresh():
             ui.navigate.to("/references")
 
         # ── Action bar ──────────────────────────────────────────────────────
-        ui.label("A biblioteca re?ne as fontes do projeto e alimenta as sugest?es de evid?ncia.").style("font-size:13px; color:#8b90a0; margin-bottom:12px;")
+        ui.label("A biblioteca reúne as fontes do projeto e alimenta as sugestões de evidência.").style("font-size:13px; color:#8b90a0; margin-bottom:12px;")
         with ui.row().style("align-items:center; gap:10px; margin-bottom:20px; flex-wrap:wrap;"):
             ui.label(f"{len(refs)} referências").style("font-size:14px; color:#8b90a0; flex:1;")
 

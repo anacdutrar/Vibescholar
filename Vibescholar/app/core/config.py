@@ -4,7 +4,7 @@ _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 class Settings:
     PROJECT_NAME: str = "VibeScholar"
-    SECRET_KEY: str = os.getenv("SECRET_KEY", "super-secret-key-change-in-production-123456")
+    SECRET_KEY: str = os.getenv("SECRET_KEY", "2134763u46827163484wudyg3468r4")
     # Resolves DB path relative to project root so it works for any user
     DATABASE_URL: str = os.getenv(
         "DATABASE_URL",

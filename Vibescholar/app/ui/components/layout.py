@@ -64,12 +64,12 @@ def sidebar(current_page: str) -> None:
             with ui.element("div").style(
                 "background:rgba(99,102,241,.12); border:1px solid rgba(99,102,241,.25); "
                 "border-radius:8px; padding:10px 12px; margin-bottom:8px;"
-            ):
+            ).props('id="current-project-chip"'):
                 ui.label("PROJETO ATUAL").style("font-size:10px; font-weight:600; color:#8b90a0; letter-spacing:.5px;")
                 ui.label(proj_name).style("font-size:13px; font-weight:600; color:#f0f2ff; margin-top:2px;")
 
         # Navigation
-        ui.label("NAVEGAÇÃO").style(
+        ui.label("Navegação").style(
             "font-size:10px; font-weight:600; color:#8b90a0; letter-spacing:.5px; "
             "padding:0 8px; margin:8px 0 4px;"
         )
