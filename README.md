@@ -62,6 +62,15 @@ VibeScholar/
         ├── utils/              # Funções utilitárias
         └── tests/              # Testes automatizados
 ```
+## Escolhas de Design
+
+Foi adotada uma arquitetura em camadas (Router → Service → Repository → SQLAlchemy) para separar responsabilidades e facilitar futuras integrações com mecanismos reais de IA.
+
+A interface foi desenvolvida em NiceGUI por permitir construir toda a aplicação em Python, reduzindo a complexidade de sincronização entre frontend e backend durante o desenvolvimento do MVP.
+
+SQLite foi escolhido por dispensar infraestrutura adicional e facilitar a execução local da aplicação, sendo suficiente para o escopo do protótipo.
+
+Os serviços responsáveis pelas sugestões de evidências utilizam um Provider Mock implementando a mesma interface que será utilizada futuramente por IA e provedores, permitindo substituir apenas a implementação sem alterar o restante da arquitetura.
 
 ## Instalação
 
@@ -139,7 +148,11 @@ As avaliações abaixo registram observações obtidas durante esse experimento 
 
 O Qwen 3.5 9B foi executado localmente por meio do Ollama. Inicialmente, atuou como analista de requisitos e, posteriormente, assumiu atividades próximas às de Product Owner. O modelo contribuiu para localizar ambiguidades, formular perguntas pertinentes e organizar necessidades do produto. O SDD localizado em docs foi construido por ele.
 
-Na geração da arquitetura completa, foram observadas limitações relacionadas à capacidade da máquina utilizada. O modelo possua contexto oficial informado de até 262.144 tokens, o experimento com Ollama fo limitava ao inicial de 4.096 tokens, o que trouxe necessidade de correção em ambiente de execussão.
+Na geração da arquitetura completa, foram observadas limitações relacionadas à capacidade da máquina utilizada:
+
+- O modelo possua contexto oficial informado de até 262.144 tokens, o experimento com Ollama o limitava ao inicial de 4.096 tokens, o que trouxe necessidade de correção em ambiente de execussão.
+- Pelas capacidades do notebook utilizado, uma tarefa poderia demorar entre 1 a 5 horas para ser realizada.
+- Por vezes, o modelo pensava tanto que ocupava todo o espaço do contexto, resultando em crash.
 
 Durante as atividades de arquitetura, a temperatura utilizada ficou de `0.5`, com a maior janela de contexto viável no ambiente. Na geração de código, a redução do `presence_penalty` de  `1.5` para `0.3` produziu resultados mais adequados ao experimento. Esses valores representam somente observações práticas desse ambiente.
 
@@ -604,11 +617,17 @@ Ao terminar pare.
 
 ### Codex GPT-5.5
 
-O Codex GPT-5.5 foi empregado na revisão estrutural do projeto, na comparação entre implementação e documentação e na identificação de violações de regras de negócio. Durante o experimento, mostrou boa capacidade para localizar inconsistências distribuídas entre diferentes camadas e apresentou baixa incidência de respostas factualmente incompatíveis com o código analisado.
+O Codex GPT-5.5 foi empregado na revisão estrutural do projeto, na comparação entre implementação e documentação e na identificação de violações de regras de negócio. Durante o experimento, mostrou boa capacidade para localizar inconsistências distribuídas entre diferentes camadas e apresentou baixa incidência de respostas factualmente incompatíveis com o código analisado. No entanto, aconteceram por vezes, especialmente envolvendo regras de negócio. Foi necessária certa intervenção humana.
+
+
 
 ### Codex GPT-5.6
 
 O Codex GPT-5.6 foi utilizado nos refinamentos finais da implementação. As sugestões apresentaram qualidade técnica consistente no contexto avaliado, acompanhadas, porém, de consumo de créditos significativamente maior.
+
+Algumas correções de bugs relacionados ao ciclo de vida dos componentes do NiceGUI exigiram investigação manual antes da geração do prompt apropriado.
+
+O Chatgpt auxiliou na geração dos prompts.
 
 Exemplo de prompt(uma vez que o contexto já estava carregado):
 
