@@ -145,11 +145,11 @@ Durante as atividades de arquitetura, a temperatura utilizada ficou de `0.5`, co
 
 Foram utilizados prompts como:
 
-´´´ Você atuará como Principal Software Architect, com experiência em arquitetura corporativa, DDD, modelagem de domínio, engenharia de software e sistemas orientados à evolução de longo prazo.
+```text Você atuará como Principal Software Architect, com experiência em arquitetura corporativa, DDD, modelagem de domínio, engenharia de software e sistemas orientados à evolução de longo prazo.
 Sua função nesta etapa NÃO é reescrever o documento.
 Sua função é realizar uma revisão arquitetural crítica e independente do Software Design Document anexado.
 Considere que este documento será a única fonte de verdade (Single Source of Truth) para a implementação do sistema."
-´´´
+```
 
 Para correções do SDD.
 
@@ -167,7 +167,7 @@ Tanto para o claude quanto para o gemini, foram utilizados os mesmos prompts, co
 
 Exemplos de prompt:
 
-´´´ Revise o Implementation Plan e incorpore as seguintes melhorias arquiteturais antes do início da implementação.
+```text Revise o Implementation Plan e incorpore as seguintes melhorias arquiteturais antes do início da implementação.
 
 As alterações abaixo não modificam a arquitetura, apenas completam lacunas importantes.
 
@@ -532,11 +532,11 @@ Markdown
 ↓
 
 Importar 
-´´´
+```
 
 e para implementação:
 
-´´´
+```text
 Você atuará como Engenheiro de Software Sênior responsável pela implementação do projeto VibeScholar.
 
 Leia os documentos da pasta docs considerando a seguinte prioridade:
@@ -600,7 +600,7 @@ Não implemente Routers.
 Não implemente Interface.
 
 Ao terminar pare. 
-´´´
+```
 
 ### Codex GPT-5.5
 
@@ -612,7 +612,7 @@ O Codex GPT-5.6 foi utilizado nos refinamentos finais da implementação. As sug
 
 Exemplo de prompt(uma vez que o contexto já estava carregado):
 
-´´´
+```text
 Corrija exclusivamente três problemas: exclusão de projeto, erro 500 na busca mock de evidências e apresentação das sentenças por
   parágrafo.
 
@@ -645,9 +645,8 @@ Corrija exclusivamente três problemas: exclusão de projeto, erro 500 na busca 
 
   O log também apresenta:
 
-  ```text
+
   An element has been deleted but is still being used.
-  ```
 
   Em outro fluxo do dashboard, o callback executa um refresh e depois tenta manipular um botão que já foi destruído pelo
   `@ui.refreshable`.
@@ -668,9 +667,8 @@ Corrija exclusivamente três problemas: exclusão de projeto, erro 500 na busca 
   * criar esse diálogo no escopo estável de `dashboard_page`;
   * manter o projeto pendente de exclusão em um estado mutável simples, por exemplo:
 
-  ```python
+
   project_pending_delete = {"project": None}
-  ```
 
   * clicar na lixeira deve apenas:
 
@@ -718,18 +716,17 @@ Corrija exclusivamente três problemas: exclusão de projeto, erro 500 na busca 
 
   O endpoint retorna 500 porque tenta inserir:
 
-  ```text
   document_version_id = 16
   sentence_uuid = b646f53a-cae0-4b35-89f3-f07f28d5370e
   reference_id = -3
   status = PENDING
-  ```
+
 
   O SQLite retorna:
 
-  ```text
+
   FOREIGN KEY constraint failed
-  ```
+
 
   O traceback aponta para:
 
@@ -901,7 +898,7 @@ Corrija exclusivamente três problemas: exclusão de projeto, erro 500 na busca 
   10. como o filtro por parágrafo funciona;
   11. arquivos alterados;
   12. confirmação de que nenhum arquivo foi excluído.
-´´´
+```
 
 ## Observações
 
