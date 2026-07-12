@@ -2,8 +2,10 @@
 # Python
 # ==========================
 __pycache__/
+*.pyc
 *.py[cod]
 .pytest_cache/
+pytest-cache-files-*/
 .mypy_cache/
 
 # Ambientes virtuais
@@ -15,13 +17,17 @@ env/
 # SQLite
 # ==========================
 
+*.db
+
 # Arquivos temporários do SQLite
 *.db-shm
 *.db-wal
 *.db-journal
 
-# Se o banco NÃO deve ir para o Git, descomente:
-# *.db
+# ==========================
+# NiceGUI
+# ==========================
+.nicegui/
 
 # ==========================
 # Logs
@@ -53,3 +59,20 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+
+# ==========================
+# Uploads, exports e temporários
+# ==========================
+uploads/
+exports/
+tmp/
+temp/
+*.tmp
+*.temp
+*.part
+export_*.md
+export_*.docx
+export_*.pdf
+export_*.bib
+export_*_apa.txt
+export_*_abnt.txt
