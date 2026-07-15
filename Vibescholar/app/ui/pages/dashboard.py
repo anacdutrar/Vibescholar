@@ -1,8 +1,10 @@
 """
 VibeScholar – Dashboard Page
-==============================
-Shows: project selector/creator, document list, grounding score summary.
+============================== h
+Shows: project selector/creator, document list, grounding score summary.h
+
 """
+#imp
 import time
 import httpx
 from nicegui import ui

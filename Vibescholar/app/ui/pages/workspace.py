@@ -10,7 +10,7 @@ Full document editor with:
   • Grounding dashboard panel
   • Version history panel
   • Document selector
-  • Settings button (opens settings dialog)
+  • Settings button (opens settings dialog)h
 """
 import json
 import base64

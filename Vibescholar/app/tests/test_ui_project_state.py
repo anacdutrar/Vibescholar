@@ -1,7 +1,7 @@
 from app.ui import state
 from app.ui.pages.dashboard import _select_valid_current_project
 
-
+#g
 def test_clear_project_context_clears_project_and_document(monkeypatch) -> None:
     storage = {
         "current_project": {"id": 9, "name": "Projeto excluído"},

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-
+#g
 UI_ROOT = Path(__file__).resolve().parents[1] / "ui"
 MOJIBAKE_PATTERNS = ("Ã", "Â", "�")
 

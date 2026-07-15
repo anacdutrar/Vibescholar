@@ -2,7 +2,7 @@
 VibeScholar – Shared UI State & Session Store
 =============================================
 Provides a centralised, per-user app.storage.user namespace wrapper
-so all NiceGUI pages can read/write session data safely.
+so all NiceGUI pages can read/write session data safely. h
 """
 from nicegui import app as ngapp
 

@@ -1,7 +1,7 @@
 """
 VibeScholar – Shared Layout Components
 =======================================
-Provides: header bar, sidebar navigation, auth guard.
+Provides: header bar, sidebar navigation, auth guard. h
 """
 from nicegui import ui
 from app.core.logging import logger
