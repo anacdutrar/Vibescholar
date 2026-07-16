@@ -13,6 +13,7 @@ from app.llm.exceptions import (
     LLMResponseValidationError,
     LLMTimeoutError,
     LLMUnavailableError,
+    UnknownToolError,
 )
 from app.services.evidence_search_state import SearchAlreadyInProgressError
 
@@ -90,6 +91,7 @@ async def search_sentence_evidence(
         LLMConnectionError,
         LLMUnavailableError,
         LLMResponseValidationError,
+        UnknownToolError,
     ) as exc:
         logger.warning(
             "ai.pipeline.router.failed operation=search_evidence status=llm_failure "

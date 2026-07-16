@@ -398,7 +398,13 @@ def api_search_evidence(cookies: Dict[str, str], sentence_id: int) -> List[Dict]
 
 async def api_search_evidence_async(cookies: Dict[str, str], sentence_id: int) -> List[Dict]:
     async with _async_client(cookies) as c:
-        r = await c.post("/api/sentences/search/evidence", json={"sentence_id": sentence_id})
+        # This request owns the complete bounded AI workflow. The generic UI
+        # timeout must not turn an operation still running into an empty result.
+        r = await c.post(
+            "/api/sentences/search/evidence",
+            json={"sentence_id": sentence_id},
+            timeout=None,
+        )
         if r.status_code == 409:
             try:
                 detail = r.json().get("detail")

@@ -76,3 +76,9 @@ export_*.pdf
 export_*.bib
 export_*_apa.txt
 export_*_abnt.txt
+
+# ==========================
+# Qualis local dataset
+# ==========================
+Vibescholar/data/qualis/*.xlsx
+Vibescholar/data/qualis/*.tmp

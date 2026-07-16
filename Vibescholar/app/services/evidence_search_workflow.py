@@ -30,7 +30,7 @@ from app.agents.schemas import (
 )
 from app.core.config import settings
 from app.core.logging import logger
-from app.llm.exceptions import LLMError
+from app.llm.exceptions import LLMError, UnknownToolError
 from app.services.evidence_search_state import (
     EvidenceSearchSession,
     EvidenceSearchSessionStore,
@@ -365,6 +365,14 @@ class EvidenceSearchWorkflow:
                             accumulated_evaluations,
                             default_source=last_result.source,
                         )
+            except UnknownToolError:
+                session.status = SearchSessionStatus.FAILED
+                session.touch()
+                return self._result(
+                    session,
+                    RoundResultSource.FAILED,
+                    failure_code="unauthorized_tool",
+                )
             except LLMError:
                 session.status = SearchSessionStatus.FAILED
                 session.touch()

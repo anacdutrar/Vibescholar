@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.agents.schemas import CitationHint, EvidenceVerdict
 from app.core.config import settings
 from app.core.logging import logger
+from app.llm.exceptions import UnknownToolError
 from app.models.reference import EvidenceSuggestion, ProjectReference
 from app.repositories.project_settings_repository import ProjectSettingsRepository
 from app.repositories.reference_repository import ReferenceRepository
@@ -113,6 +114,8 @@ class EvidenceService:
             result.evaluation_summary.partial_support_count,
             result.failure_code or "none",
         )
+        if result.failure_code == "unauthorized_tool":
+            raise UnknownToolError("The model requested an unauthorized tool.")
         suggestions = await self._persist_real_result(
             db=db,
             session_store=session_store,

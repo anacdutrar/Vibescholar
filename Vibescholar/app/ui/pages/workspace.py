@@ -295,6 +295,32 @@ async def _run_evidence_action_once(
         button.enable()
 
 
+async def _synchronize_evidence_suggestions(
+    suggestions_state: dict,
+    request,
+    refresh,
+) -> None:
+    """Synchronize visible loading, success and failure with one request."""
+    suggestions_state.update(status="loading", items=[], error=None)
+    refresh()
+    try:
+        suggestions_state["items"] = await request()
+        suggestions_state["status"] = "success"
+    except Exception as exc:
+        suggestions_state["error"] = str(exc)[:80]
+        suggestions_state["status"] = "error"
+    finally:
+        refresh()
+
+
+def _evidence_search_finished_empty(suggestions_state: dict) -> bool:
+    """Return true only after a successful request completed without suggestions."""
+    return (
+        suggestions_state.get("status") == "success"
+        and not suggestions_state.get("items")
+    )
+
+
 def _transition_citation_review_state(
     sentence: dict,
     new_state: str,
@@ -995,16 +1021,20 @@ async def _right_panel(
                                 )
 
                             async def search_ev() -> None:
-                                await _run_evidence_action_once(
-                                    sent["id"],
-                                    evidence_searches_in_progress,
-                                    action_button,
-                                    lambda: _evidence_panel(
+                                async def search_and_refresh() -> None:
+                                    await _evidence_panel(
                                         sent,
                                         doc,
                                         refresh_card_and_grounding,
                                         evidence_searches_in_progress,
-                                    ),
+                                    )
+                                    await refresh_card_and_grounding()
+
+                                await _run_evidence_action_once(
+                                    sent["id"],
+                                    evidence_searches_in_progress,
+                                    action_button,
+                                    search_and_refresh,
                                 )
 
                             async def review_citation() -> None:
@@ -1370,13 +1400,7 @@ async def _evidence_panel(
     """Opens evidence suggestions dialog for a sentence."""
     if searches_in_progress is None:
         searches_in_progress = set()
-    suggestions_state = {"items": [], "error": None}
-    try:
-        suggestions_state["items"] = await api.api_search_evidence_async(
-            state.get_cookies(), sentence["id"]
-        )
-    except Exception as exc:
-        suggestions_state["error"] = str(exc)[:80]
+    suggestions_state = {"status": "loading", "items": [], "error": None}
 
     with ui.dialog() as dlg, ui.card().style(
         "background:#1a1d27; border:1px solid rgba(255,255,255,.08); border-radius:16px; "
@@ -1389,7 +1413,15 @@ async def _evidence_panel(
 
         @ui.refreshable
         def evidence_content() -> None:
-            if suggestions_state["error"]:
+            if suggestions_state["status"] == "loading":
+                with ui.row().style("align-items:center; gap:10px;"):
+                    ui.spinner(size="sm", color="indigo")
+                    ui.label("Buscando evidências...").style(
+                        "font-size:14px; color:#b8bdcc;"
+                    )
+                return
+
+            if suggestions_state["status"] == "error":
                 ui.label(f"Erro ao buscar evidências: {suggestions_state['error']}").style("font-size:13px; color:#ef4444;")
                 return
 
@@ -1406,29 +1438,31 @@ async def _evidence_panel(
                 _render_suggestions(pending, sentence, refresh_fn, evidence_content.refresh)
             if not pending:
                 async def search_more() -> None:
-                    try:
-                        async def request_more() -> None:
-                            suggestions_state["items"] = (
-                                await api.api_search_evidence_async(
-                                    state.get_cookies(), sentence["id"]
-                                )
-                            )
-
-                        await _run_evidence_action_once(
-                            sentence["id"],
-                            searches_in_progress,
-                            search_more_button,
-                            request_more,
+                    async def request_more() -> list[dict]:
+                        return await api.api_search_evidence_async(
+                            state.get_cookies(), sentence["id"]
                         )
-                        suggestions_state["error"] = None
-                    except Exception as exc:
-                        suggestions_state["error"] = str(exc)[:80]
-                    evidence_content.refresh()
+
+                    async def synchronize_more() -> None:
+                        await _synchronize_evidence_suggestions(
+                            suggestions_state,
+                            request_more,
+                            evidence_content.refresh,
+                        )
+                        if suggestions_state["status"] == "success":
+                            await refresh_fn()
+
+                    await _run_evidence_action_once(
+                        sentence["id"],
+                        searches_in_progress,
+                        search_more_button,
+                        synchronize_more,
+                    )
 
                 search_more_button = ui.button(
                     "Buscar mais sugestões", on_click=search_more
                 ).classes("vs-btn-ghost").style("margin-top:8px;")
-            if not suggestions:
+            if _evidence_search_finished_empty(suggestions_state):
                 ui.label("Nenhuma sugestão encontrada para esta sentença.").style("font-size:14px; color:#8b90a0;")
             if rejected:
                 ui.label(f"{len(rejected)} sugestão(ões) rejeitada(s).").style("font-size:12px; color:#8b90a0; margin-top:8px;")
@@ -1436,6 +1470,13 @@ async def _evidence_panel(
         evidence_content()
         ui.button("Fechar", on_click=dlg.close).classes("vs-btn-ghost").style("width:100%; margin-top:16px;")
     dlg.open()
+    await _synchronize_evidence_suggestions(
+        suggestions_state,
+        lambda: api.api_search_evidence_async(
+            state.get_cookies(), sentence["id"]
+        ),
+        evidence_content.refresh,
+    )
 
 
 def _render_suggestions(suggestions: list, sentence: dict, refresh_fn, evidence_refresh_fn) -> None:

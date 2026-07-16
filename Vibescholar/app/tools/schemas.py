@@ -15,6 +15,7 @@ from app.agents.schemas import (
     SentenceType,
 )
 from app.core.config import settings
+from app.utils.issn import normalize_issn
 
 
 class AcademicSearchInput(BaseModel):
@@ -259,17 +260,6 @@ def is_valid_doi(value: str | None) -> bool:
 def normalize_title(value: str | None) -> str:
     """Normalize a title for deterministic comparison without semantic changes."""
     return normalize_text(value or "", remove_punctuation=True)
-
-
-def normalize_issn(value: str | None) -> str | None:
-    """Normalize a syntactically usable print or electronic ISSN."""
-    if not value:
-        return None
-    compact = re.sub(r"^e?issn:\s*", "", value.strip(), flags=re.IGNORECASE)
-    compact = re.sub(r"[^0-9Xx]", "", compact).upper()
-    if not re.fullmatch(r"\d{7}[\dX]", compact):
-        return None
-    return f"{compact[:4]}-{compact[4:]}"
 
 
 def normalize_authors(values: Iterable[str] | None) -> list[str]:

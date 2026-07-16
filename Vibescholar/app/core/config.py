@@ -128,6 +128,7 @@ class Settings:
     ACADEMIC_PROVIDER_TIMEOUT_SECONDS: float = _positive_float(
         "ACADEMIC_PROVIDER_TIMEOUT_SECONDS", 15.0
     )
+    QUALIS_DATABASE_PATH: str
 
     def __init__(self) -> None:
         """Read inference controls when a settings instance is created."""
@@ -164,6 +165,12 @@ class Settings:
             "EVIDENCE_EVALUATOR_MAX_OUTPUT_TOKENS",
             2000,
         )
+        self.QUALIS_DATABASE_PATH = os.getenv(
+            "QUALIS_DATABASE_PATH",
+            "data/qualis/qualis.sqlite3",
+        ).strip()
+        if not self.QUALIS_DATABASE_PATH:
+            raise ValueError("QUALIS_DATABASE_PATH must not be empty")
 
     def __repr__(self) -> str:
         """Return a diagnostic representation that never includes secret values."""

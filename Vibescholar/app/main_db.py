@@ -61,80 +61,7 @@ def init_db(db: Session = None):
         )
         db.add(project_settings)
 
-        # 4. Create Mock Bibliography References
-        mock_refs = [
-            ProjectReference(
-                project_id=sample_project.id,
-                title="Deep Residual Learning for Image Recognition",
-                authors="He, K., Zhang, X., Ren, S., & Sun, J.",
-                journal="IEEE Conference on Computer Vision and Pattern Recognition (CVPR)",
-                year=2016,
-                doi="10.1109/CVPR.2016.90",
-                qualis_score="A1",
-                abstract="Deep convolutional neural networks have led to a series of breakthroughs for image classification.",
-                availability="ABERTO"
-            ),
-            ProjectReference(
-                project_id=sample_project.id,
-                title="You Only Look Once: Unified, Real-Time Object Detection",
-                authors="Redmon, J., Divvala, S., Girshick, R., & Farhadi, A.",
-                journal="IEEE Conference on Computer Vision and Pattern Recognition (CVPR)",
-                year=2016,
-                doi="10.1109/CVPR.2016.91",
-                qualis_score="A1",
-                abstract="We present YOLO, a new approach to object detection.",
-                availability="ABERTO"
-            ),
-            ProjectReference(
-                project_id=sample_project.id,
-                title="Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks",
-                authors="Lewis, P., Perez, E., Piktus, A., et al.",
-                journal="Advances in Neural Information Processing Systems (NeurIPS)",
-                year=2020,
-                doi="10.5555/3495724.3495810",
-                qualis_score="A1",
-                abstract="We propose Retrieval-Augmented Generation (RAG) for scientific grounding.",
-                availability="ABERTO"
-            ),
-            ProjectReference(
-                project_id=sample_project.id,
-                title="Convolutional Neural Networks for Visual Recognition",
-                authors="LeCun, Y., Bengio, Y., & Hinton, G.",
-                journal="Nature",
-                year=2015,
-                doi="10.1038/nature14539",
-                qualis_score="A1",
-                abstract="A foundational study showing that convolutional networks have excellent results in object detection.",
-                availability="ABERTO"
-            ),
-            ProjectReference(
-                project_id=sample_project.id,
-                title="A Survey of Deep Learning Techniques for Object Detection",
-                authors="Zhao, Z. Q., Zheng, P., Xu, S. T., & Wu, X.",
-                journal="IEEE Transactions on Neural Networks and Learning Systems",
-                year=2019,
-                doi="10.1109/TNNLS.2018.2876865",
-                qualis_score="A2",
-                abstract="This paper provides a detailed review of object detection methods in deep learning.",
-                availability="FECHADO"
-            ),
-            # Global Reference (project_id is NULL)
-            ProjectReference(
-                project_id=None,
-                title="Standard Reference Manual for Academic Writers",
-                authors="VibeScholar Editorial Board",
-                journal="Academic Press",
-                year=2024,
-                doi="10.9999/abnt.2024.1",
-                qualis_score="B2",
-                abstract="Standard manual describing how to format ABNT, APA and other reference types.",
-                availability="FECHADO"
-            )
-        ]
-        db.add_all(mock_refs)
-        db.flush()
-
-        # 5. Create Sample Document
+        # 4. Create Sample Document
         doc_content = (
             "Redes neurais convolucionais apresentam excelentes resultados para detecção de objetos. "
             "YOLO é uma das abordagens mais populares na literatura acadêmica recente. "
@@ -150,7 +77,7 @@ def init_db(db: Session = None):
         db.add(sample_doc)
         db.flush()  # Generates sample_doc.id
 
-        # 6. Create First Version Snapshot
+        # 5. Create First Version Snapshot
         first_version = DocumentVersion(
             document_id=sample_doc.id,
             version_number=1,
@@ -164,7 +91,7 @@ def init_db(db: Session = None):
         sample_doc.current_version_id = first_version.id
         db.add(sample_doc)
 
-        # 7. Add Sentences for Version 1
+        # 6. Add Sentences for Version 1
         sentences_data = [
             ("Redes neurais convolucionais apresentam excelentes resultados para detecção de objetos.", 1, 1, 10.0),
             ("YOLO é uma das abordagens mais populares na literatura acadêmica recente.", 1, 2, 20.0),
@@ -188,7 +115,7 @@ def init_db(db: Session = None):
             )
             db.add(s)
 
-        # 8. Create Grounding Report
+        # 7. Create Grounding Report
         report = GroundingReport(
             document_id=sample_doc.id,
             supported_count=0,
@@ -199,7 +126,7 @@ def init_db(db: Session = None):
         )
         db.add(report)
 
-        # 9. Create standard lack of evidence Quality Issues for each unverified sentence
+        # 8. Create standard lack of evidence Quality Issues for each unverified sentence
         for text, para_num, sent_num, pos in sentences_data:
             normalized_text = text.lower().strip().replace(".", "").replace("!", "").replace("?", "")
             sentence_uuid = hashlib.md5(normalized_text.encode("utf-8")).hexdigest()

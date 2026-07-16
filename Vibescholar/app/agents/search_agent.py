@@ -92,6 +92,14 @@ class SearchAgent:
             },
         ]
 
+    @staticmethod
+    def _allowed_tool_names() -> tuple[str, ...]:
+        """Return the exact function-name whitelist exposed to the model."""
+        return tuple(
+            definition["function"]["name"]
+            for definition in SearchAgent._tool_definitions()
+        )
+
     def _build_messages(
         self,
         sentence: str,
@@ -260,6 +268,16 @@ class SearchAgent:
                 tool_name = SearchToolName.RESOLVE_CITATION_METADATA
                 sentence_type = SentenceType.CITATION_CLAIM
             else:
+                requested_tool_name = str(sdk_call.tool_name).encode(
+                    "unicode_escape"
+                ).decode("ascii")
+                logger.warning(
+                    "ai.pipeline.search_agent.failed decision=%s requested_tool_name=%s "
+                    "allowed_tool_names=%s termination=unauthorized_tool",
+                    decision_kind,
+                    requested_tool_name,
+                    self._allowed_tool_names(),
+                )
                 raise UnknownToolError("The model requested an unauthorized tool.")
         except UnknownToolError:
             raise
