@@ -6,7 +6,7 @@ from functools import lru_cache
 from app.agents.evidence_evaluator import EvidenceEvaluator
 from app.agents.search_agent import SearchAgent
 from app.core.config import settings
-from app.llm.ollama_client import OllamaClient
+from app.llm.ollama_client import LLMComponent, OllamaClient
 from app.services.academic_search_executor import AcademicSearchExecutor
 from app.services.citation_resolution_executor import CitationResolutionExecutor
 from app.services.evidence_search_state import EvidenceSearchSessionStore
@@ -25,7 +25,8 @@ class EvidenceSearchRuntime:
 @lru_cache(maxsize=1)
 def get_evidence_search_runtime() -> EvidenceSearchRuntime:
     """Compose the real runtime lazily without performing network calls."""
-    client = OllamaClient()
+    search_client = OllamaClient(component=LLMComponent.SEARCH_AGENT)
+    evaluator_client = OllamaClient(component=LLMComponent.EVIDENCE_EVALUATOR)
     session_store = EvidenceSearchSessionStore(
         ttl_seconds=settings.SEARCH_SESSION_TTL_SECONDS,
         max_sessions=settings.MAX_IN_MEMORY_SEARCH_SESSIONS,
@@ -33,8 +34,8 @@ def get_evidence_search_runtime() -> EvidenceSearchRuntime:
     academic_executor = AcademicSearchExecutor()
     citation_executor = CitationResolutionExecutor()
     workflow = EvidenceSearchWorkflow(
-        search_agent=SearchAgent(client),
-        evidence_evaluator=EvidenceEvaluator(client),
+        search_agent=SearchAgent(search_client),
+        evidence_evaluator=EvidenceEvaluator(evaluator_client),
         reference_filter=ReferenceFilterService(),
         session_store=session_store,
         academic_search_executor=academic_executor,

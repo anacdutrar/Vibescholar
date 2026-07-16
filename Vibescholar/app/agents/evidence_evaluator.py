@@ -152,6 +152,12 @@ class EvidenceEvaluator:
         messages = self._build_messages(validated_sentence, validated_candidates)
         started_at = time.perf_counter()
         backend = type(self._client).__name__
+        logger.info(
+            "ai.pipeline.evaluator.started backend=%s candidate_count=%s batch_limit=%s",
+            backend,
+            len(validated_candidates),
+            self.MAX_BATCH_SIZE,
+        )
         try:
             response = await self._client.structured_chat(messages, EvidenceEvaluationBatch)
             if not isinstance(response, EvidenceEvaluationBatch):
@@ -165,7 +171,7 @@ class EvidenceEvaluator:
             ) from exc
         except LLMError:
             logger.warning(
-                "evidence_evaluator.failed backend=%s candidate_count=%s duration=%.4f",
+                "ai.pipeline.evaluator.failed backend=%s candidate_count=%s duration=%.4f",
                 backend,
                 len(validated_candidates),
                 time.perf_counter() - started_at,
@@ -176,7 +182,7 @@ class EvidenceEvaluator:
             evaluation.verdict.value for evaluation in validated_response.evaluations
         )
         logger.info(
-            "evidence_evaluator.completed backend=%s candidate_count=%s duration=%.4f verdicts=%s",
+            "ai.pipeline.evaluator.completed backend=%s candidate_count=%s duration=%.4f verdicts=%s",
             backend,
             len(validated_candidates),
             time.perf_counter() - started_at,

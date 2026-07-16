@@ -243,11 +243,25 @@ class EvidenceSearchWorkflow:
             raise ValueError("sentence must contain non-whitespace text")
         key: SearchSessionKey = (user_id, document_version_id, sentence_uuid)
         started_at = time.perf_counter()
+        logger.info(
+            "ai.pipeline.workflow.started user_id=%s version_id=%s sentence_id_present=%s "
+            "citation_hints=%s max_rounds=%s",
+            user_id,
+            document_version_id,
+            bool(sentence_uuid),
+            len(citation_hints or []),
+            settings.MAX_SEARCH_ROUNDS,
+        )
 
         async with self._session_store.search_guard(key) as session:
             try:
                 reserves = self._unshown_evaluations(session)
                 if reserves:
+                    logger.info(
+                        "ai.pipeline.workflow.reused source=unshown_reserve count=%s round=%s",
+                        len(reserves),
+                        session.current_round,
+                    )
                     return self._result(
                         session,
                         RoundResultSource.UNSHOWN_RESERVE,
@@ -257,6 +271,11 @@ class EvidenceSearchWorkflow:
                 accumulated_evaluations: list[EvidenceEvaluation] = []
                 pending = self._pending_candidates(session)
                 if pending:
+                    logger.info(
+                        "ai.pipeline.workflow.reused source=pending_evaluations count=%s round=%s",
+                        len(pending),
+                        session.current_round,
+                    )
                     accumulated_evaluations.extend(
                         await self._evaluate_atomically(session, sentence, pending)
                     )
@@ -352,7 +371,8 @@ class EvidenceSearchWorkflow:
                 raise
             finally:
                 logger.info(
-                    "evidence_workflow.finished user_id=%s version_id=%s round=%s status=%s duration=%.4f",
+                    "ai.pipeline.workflow.finished user_id=%s version_id=%s round=%s "
+                    "status=%s duration=%.4f",
                     user_id,
                     document_version_id,
                     session.current_round,
@@ -372,6 +392,14 @@ class EvidenceSearchWorkflow:
         """Execute one initial or refined inference and process its typed outcome."""
         session.current_round += 1
         session.touch()
+        logger.info(
+            "ai.pipeline.workflow.round_started round=%s decision=%s recovered_total=%s "
+            "evaluated_total=%s",
+            session.current_round,
+            "initial" if previous_round is None else "refinement",
+            len(session.recovered_candidate_keys),
+            len(session.evaluated_candidate_keys),
+        )
         if previous_round is None:
             executed_source = RoundResultSource.NEW_SEARCH
             outcome = await self._search_agent.run_search_decision(
@@ -388,6 +416,13 @@ class EvidenceSearchWorkflow:
                 academic_search_executor=self._academic_search_executor,
                 citation_resolution_executor=self._citation_resolution_executor,
             )
+
+        logger.info(
+            "ai.pipeline.workflow.agent_decision round=%s action=%s tool_called=%s",
+            session.current_round,
+            outcome.action_taken.value,
+            outcome.tool_call_id is not None,
+        )
 
         if outcome.action_taken is SearchToolName.NONE:
             session.status = SearchSessionStatus.EXHAUSTED
@@ -437,6 +472,15 @@ class EvidenceSearchWorkflow:
         public = execution.public_result
         previously_recovered = set(session.recovered_candidate_keys)
         self._record_search_metadata(session, outcome, execution)
+        logger.info(
+            "ai.pipeline.workflow.search_received round=%s status=%s raw=%s "
+            "deduplicated=%s provider_failures=%s",
+            session.current_round,
+            public.status.value,
+            public.raw_results,
+            public.after_deduplication,
+            sum(not provider.success for provider in public.providers),
+        )
         if public.status is AcademicSearchStatus.FAILED:
             session.status = SearchSessionStatus.FAILED
             round_summary = self._round_summary(session, public, 0, 0)
@@ -459,6 +503,15 @@ class EvidenceSearchWorkflow:
             new_candidates,
             filter_criteria,
         )
+        logger.info(
+            "ai.pipeline.workflow.filtered round=%s new_candidates=%s accepted=%s "
+            "rejected=%s skipped_previous=%s",
+            session.current_round,
+            len(new_candidates),
+            filter_result.total_accepted,
+            filter_result.total_rejected,
+            len(execution.candidates) - len(new_candidates),
+        )
         for reference in filter_result.accepted:
             session.candidates[reference.candidate_key] = EvidenceSearchCandidate(
                 reference=reference,
@@ -468,6 +521,11 @@ class EvidenceSearchWorkflow:
         self._record_filter_statistics(session, filter_result)
 
         pending = self._pending_candidates(session)
+        logger.info(
+            "ai.pipeline.workflow.evaluation_ready round=%s pending=%s",
+            session.current_round,
+            len(pending),
+        )
         evaluations = (
             await self._evaluate_atomically(session, sentence, pending)
             if pending
@@ -506,6 +564,14 @@ class EvidenceSearchWorkflow:
     ) -> list[EvidenceEvaluation]:
         """Evaluate batches first and mutate session state only after all succeed."""
         batch_size = min(settings.EVIDENCE_BATCH_SIZE, 5)
+        batch_count = (len(candidates) + batch_size - 1) // batch_size
+        started_at = time.perf_counter()
+        logger.info(
+            "ai.pipeline.workflow.evaluation_started candidates=%s batch_size=%s batches=%s",
+            len(candidates),
+            batch_size,
+            batch_count,
+        )
         collected: list[EvidenceEvaluation] = []
         for offset in range(0, len(candidates), batch_size):
             batch = candidates[offset : offset + batch_size]
@@ -540,6 +606,18 @@ class EvidenceSearchWorkflow:
             elif evaluation.verdict is EvidenceVerdict.PARTIAL_SUPPORT:
                 session.partial_support_keys.add(evaluation.candidate_key)
         session.touch()
+        summary = summarize_evaluations(collected)
+        logger.info(
+            "ai.pipeline.workflow.evaluation_completed evaluated=%s strong=%s partial=%s "
+            "no_support=%s contradicts=%s insufficient=%s duration=%.4f",
+            summary.evaluated_candidates,
+            summary.strong_support_count,
+            summary.partial_support_count,
+            summary.no_support_count,
+            summary.contradicts_count,
+            summary.insufficient_abstract_count,
+            time.perf_counter() - started_at,
+        )
         return collected
 
     @staticmethod
@@ -719,7 +797,7 @@ class EvidenceSearchWorkflow:
                 if last_result.round_number > 1
                 else RoundResultSource.NEW_SEARCH
             )
-        return EvidenceSearchRoundResult(
+        result = EvidenceSearchRoundResult(
             session_status=session.status,
             round_number=session.current_round,
             source=source,
@@ -733,6 +811,8 @@ class EvidenceSearchWorkflow:
             refinement_recommended=refinement_recommended,
             failure_code=failure_code or last_result.failure_code,
         )
+        self._log_result(session, result)
+        return result
 
     def _result(
         self,
@@ -764,13 +844,27 @@ class EvidenceSearchWorkflow:
             refinement_recommended=refinement_recommended,
             failure_code=failure_code,
         )
+        self._log_result(session, result)
+        return result
+
+    @staticmethod
+    def _log_result(
+        session: EvidenceSearchSession,
+        result: EvidenceSearchRoundResult,
+    ) -> None:
+        """Log the safe terminal or continuation state of one workflow response."""
         logger.info(
-            "evidence_workflow.result round=%s source=%s evaluated=%s strong=%s partial=%s status=%s",
+            "ai.pipeline.workflow.result round=%s source=%s evaluated=%s strong=%s "
+            "partial=%s status=%s target_reached=%s refinement=%s failure_code=%s "
+            "termination=%s",
             result.round_number,
             result.source.value,
             result.evaluation_summary.evaluated_candidates,
             len(session.strong_support_keys),
             len(session.partial_support_keys),
             result.session_status.value,
+            result.target_reached,
+            result.refinement_recommended,
+            result.failure_code or "none",
+            result.source.value,
         )
-        return result

@@ -6,9 +6,11 @@ future QualisLookupService. This module does not infer or simulate Qualis data.
 
 from collections import Counter
 from enum import Enum
+import time
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.core.logging import logger
 from app.tools.schemas import ReferenceCandidate
 
 
@@ -124,6 +126,15 @@ class ReferenceFilterService:
         metadata field violates an enabled criterion.
         """
         validated_criteria = ReferenceFilterCriteria.model_validate(criteria)
+        started_at = time.perf_counter()
+        logger.info(
+            "ai.pipeline.filter.started received=%s year_min_enabled=%s "
+            "year_max_enabled=%s open_access_enabled=%s",
+            len(candidates),
+            validated_criteria.publication_year_min is not None,
+            validated_criteria.publication_year_max is not None,
+            validated_criteria.only_open_access,
+        )
         accepted: list[ReferenceCandidate] = []
         rejected: list[RejectedReferenceCandidate] = []
         reason_counts: Counter[FilterReason] = Counter()
@@ -142,7 +153,7 @@ class ReferenceFilterService:
             else:
                 accepted.append(candidate)
 
-        return ReferenceFilterResult(
+        result = ReferenceFilterResult(
             accepted=accepted,
             rejected=rejected,
             total_received=len(candidates),
@@ -150,6 +161,16 @@ class ReferenceFilterService:
             total_rejected=len(rejected),
             reason_counts=dict(reason_counts),
         )
+        logger.info(
+            "ai.pipeline.filter.completed received=%s accepted=%s rejected=%s "
+            "reason_counts=%s duration=%.4f",
+            result.total_received,
+            result.total_accepted,
+            result.total_rejected,
+            {reason.value: count for reason, count in result.reason_counts.items()},
+            time.perf_counter() - started_at,
+        )
+        return result
 
     @staticmethod
     def _rejection_reasons(

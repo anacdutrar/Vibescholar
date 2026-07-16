@@ -1,9 +1,11 @@
 """Concrete concurrent resolution of one set of citation hints."""
 
 import asyncio
+import time
 
 from app.agents.schemas import CitationHint
 from app.core.config import settings
+from app.core.logging import logger
 from app.llm.exceptions import (
     AcademicProviderError,
     ToolArgumentsValidationError,
@@ -54,6 +56,14 @@ class CitationResolutionExecutor:
         if not providers:
             raise ToolUnavailableError("No citation resolution provider is enabled.")
 
+        started_at = time.perf_counter()
+        logger.info(
+            "ai.pipeline.executor.started executor=citation_resolution providers=%s "
+            "criterion=%s limit=%s",
+            len(providers),
+            criterion,
+            self._lookup_limit,
+        )
         outcomes = await asyncio.gather(
             *(
                 provider.lookup(limit=self._lookup_limit, **lookup_arguments)
@@ -87,7 +97,7 @@ class CitationResolutionExecutor:
             failures=failures,
             successful_providers=successful_providers,
         )
-        return CitationResolutionExecutionResult(
+        result = CitationResolutionExecutionResult(
             matches=matches,
             public_result=CitationResolutionToolResult(
                 status=status,
@@ -95,6 +105,17 @@ class CitationResolutionExecutor:
                 message=self._message(status),
             ),
         )
+        logger.info(
+            "ai.pipeline.executor.completed executor=citation_resolution status=%s "
+            "providers=%s provider_failures=%s raw_matches=%s matches=%s duration=%.4f",
+            status.value,
+            len(providers),
+            failures,
+            len(raw_matches),
+            len(matches),
+            time.perf_counter() - started_at,
+        )
+        return result
 
     @staticmethod
     def _lookup_arguments(

@@ -22,8 +22,8 @@ class AcademicSearchInput(BaseModel):
 
     queries: list[str] = Field(
         min_length=1,
-        max_length=5,
-        description="Distinct academic search queries selected by the model.",
+        max_length=1,
+        description="Exactly one principal academic search query selected for this round.",
     )
     limit_per_provider: int = Field(
         gt=0,

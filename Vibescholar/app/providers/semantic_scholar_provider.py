@@ -88,7 +88,7 @@ class SemanticScholarProvider:
             raise self._error("search", AcademicProviderErrorCode.INVALID_RESPONSE)
         candidates = self._normalize_many(results, effective_limit)
         logger.info(
-            "academic_provider.completed provider=%s operation=search status=success received=%d normalized=%d",
+            "ai.pipeline.provider.completed provider=%s operation=search status=success received=%d normalized=%d",
             self.provider_name,
             len(results),
             len(candidates),
@@ -105,6 +105,7 @@ class SemanticScholarProvider:
         limit: int = 5,
     ) -> list[ReferenceCandidate]:
         """Resolve metadata by DOI, then title, then author/year using one request."""
+        started_at = time.perf_counter()
         effective_limit = self._validated_limit(limit)
         normalized_doi = normalize_doi(doi) if is_valid_doi(doi) else None
         if normalized_doi:
@@ -114,7 +115,17 @@ class SemanticScholarProvider:
                 params={"fields": _PAPER_FIELDS},
                 not_found_is_empty=True,
             )
-            return self._normalize_many([payload] if payload else [], effective_limit)
+            candidates = self._normalize_many(
+                [payload] if payload else [], effective_limit
+            )
+            logger.info(
+                "ai.pipeline.provider.completed provider=%s operation=lookup criterion=doi "
+                "status=success normalized=%d duration=%.4f",
+                self.provider_name,
+                len(candidates),
+                time.perf_counter() - started_at,
+            )
+            return candidates
 
         clean_title = " ".join((title or "").strip().split())
         clean_authors = normalize_authors(authors)
@@ -135,7 +146,17 @@ class SemanticScholarProvider:
         results = payload.get("data", []) if payload else []
         if not isinstance(results, list):
             raise self._error("lookup", AcademicProviderErrorCode.INVALID_RESPONSE)
-        return self._normalize_many(results, effective_limit)
+        candidates = self._normalize_many(results, effective_limit)
+        logger.info(
+            "ai.pipeline.provider.completed provider=%s operation=lookup criterion=%s "
+            "status=success received=%d normalized=%d duration=%.4f",
+            self.provider_name,
+            "title" if clean_title else "author_year",
+            len(results),
+            len(candidates),
+            time.perf_counter() - started_at,
+        )
+        return candidates
 
     @staticmethod
     def _validated_limit(limit: int) -> int:
@@ -165,7 +186,7 @@ class SemanticScholarProvider:
                 except httpx.TimeoutException as exc:
                     if attempt == 0:
                         logger.info(
-                            "academic_provider.retry provider=%s operation=%s code=timeout retry=true",
+                            "ai.pipeline.provider.retry provider=%s operation=%s code=timeout retry=true",
                             self.provider_name,
                             operation,
                         )
@@ -176,7 +197,7 @@ class SemanticScholarProvider:
 
                 if response.status_code in _RETRYABLE_STATUS_CODES and attempt == 0:
                     logger.info(
-                        "academic_provider.retry provider=%s operation=%s code=%s retry=true",
+                        "ai.pipeline.provider.retry provider=%s operation=%s code=%s retry=true",
                         self.provider_name,
                         operation,
                         self._status_error_code(response.status_code).value,
@@ -198,7 +219,7 @@ class SemanticScholarProvider:
                 if not isinstance(payload, dict):
                     raise self._error(operation, AcademicProviderErrorCode.INVALID_RESPONSE)
                 logger.info(
-                    "academic_provider.request provider=%s operation=%s duration=%.4f status=success retry=%s",
+                    "ai.pipeline.provider.request provider=%s operation=%s duration=%.4f status=success retry=%s",
                     self.provider_name,
                     operation,
                     time.perf_counter() - started,
@@ -245,7 +266,7 @@ class SemanticScholarProvider:
         status_code: int | None = None,
     ) -> AcademicProviderError:
         logger.warning(
-            "academic_provider.failed provider=%s operation=%s code=%s",
+            "ai.pipeline.provider.failed provider=%s operation=%s code=%s",
             self.provider_name,
             operation,
             code.value,

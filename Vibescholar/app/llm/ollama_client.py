@@ -1,6 +1,9 @@
 """Async OpenAI-compatible client isolated to a local Ollama service."""
 
 from dataclasses import dataclass
+from enum import Enum
+import json
+import time
 from typing import Sequence, TypeVar
 
 from openai import (
@@ -18,6 +21,7 @@ from openai.types.chat import (
 from pydantic import BaseModel, ValidationError
 
 from app.core.config import settings
+from app.core.logging import logger
 from app.llm.exceptions import (
     LLMConnectionError,
     LLMError,
@@ -28,6 +32,14 @@ from app.llm.exceptions import (
 
 
 ResponseModelT = TypeVar("ResponseModelT", bound=BaseModel)
+
+
+class LLMComponent(str, Enum):
+    """Explicit application component responsible for an LLM inference."""
+
+    SEARCH_AGENT = "SearchAgent"
+    EVIDENCE_EVALUATOR = "EvidenceEvaluator"
+    UNSPECIFIED = "Unspecified"
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,21 +64,33 @@ class LLMChatResponse:
 class OllamaClient:
     """Encapsulate one-request Ollama chat operations through the OpenAI SDK."""
 
-    def __init__(self, client: AsyncOpenAI | None = None) -> None:
+    _CONTEXT_CONFIGURATION = "backend_default"
+
+    def __init__(
+        self,
+        client: AsyncOpenAI | None = None,
+        *,
+        component: LLMComponent = LLMComponent.UNSPECIFIED,
+    ) -> None:
         self._model = settings.OLLAMA_MODEL
         self._timeout = settings.LLM_TIMEOUT_SECONDS
         self._base_url = self._openai_base_url(settings.OLLAMA_BASE_URL)
+        self._component = LLMComponent(component)
         self._client = client or AsyncOpenAI(
             base_url=self._base_url,
-            api_key=settings.OLLAMA_API_KEY or None,
+            api_key=settings.OLLAMA_API_KEY or "ollama",
             timeout=self._timeout,
             max_retries=0,
-            _enforce_credentials=bool(settings.OLLAMA_API_KEY),
         )
+        self._log_operational_parameters("initialized")
 
     def __repr__(self) -> str:
         """Return diagnostics without exposing configured credentials."""
-        return f"OllamaClient(base_url={self._base_url!r}, model={self._model!r}, api_key=<redacted>)"
+        return (
+            "OllamaClient("
+            f"base_url={self._base_url!r}, model={self._model!r}, "
+            f"component={self._component.value!r}, api_key=<redacted>)"
+        )
 
     @staticmethod
     def _openai_base_url(base_url: str) -> str:
@@ -97,6 +121,228 @@ class OllamaClient:
             exc.status_code in {400, 404}
             and "model" in error_text
             and any(marker in error_text for marker in markers[1:])
+        )
+
+    def _chat_request_arguments(
+        self,
+        messages: Sequence[ChatCompletionMessageParam],
+        *,
+        tools: Sequence[ChatCompletionToolParam] | None = None,
+        tool_choice: ChatCompletionToolChoiceOptionParam | None = None,
+        response_format: dict | None = None,
+    ) -> dict:
+        """Build one OpenAI-compatible request from centralized inference settings."""
+        arguments = {
+            "model": self._model,
+            "messages": messages,
+            "temperature": settings.LLM_TEMPERATURE,
+            "top_p": settings.LLM_TOP_P,
+            "frequency_penalty": settings.LLM_FREQUENCY_PENALTY,
+            "presence_penalty": settings.LLM_PRESENCE_PENALTY,
+        }
+        if settings.LLM_SEED is not None:
+            arguments["seed"] = settings.LLM_SEED
+        if tools is not None:
+            arguments["tools"] = tools
+        if tool_choice is not None:
+            arguments["tool_choice"] = tool_choice
+        if response_format is not None:
+            arguments["response_format"] = response_format
+        return arguments
+
+    def _log_operational_parameters(
+        self,
+        event: str,
+        request_arguments: dict | None = None,
+    ) -> None:
+        """Log only non-sensitive effective inference controls at DEBUG level."""
+        arguments = request_arguments or {}
+        logger.debug(
+            "llm.ollama.%s model=%s timeout_seconds=%s temperature=%s top_p=%s "
+            "frequency_penalty=%s presence_penalty=%s seed=%s context_configured=%s",
+            event,
+            arguments.get("model", self._model),
+            self._timeout,
+            arguments.get("temperature", settings.LLM_TEMPERATURE),
+            arguments.get("top_p", settings.LLM_TOP_P),
+            arguments.get("frequency_penalty", settings.LLM_FREQUENCY_PENALTY),
+            arguments.get("presence_penalty", settings.LLM_PRESENCE_PENALTY),
+            arguments.get("seed", "disabled"),
+            self._CONTEXT_CONFIGURATION,
+        )
+
+    @staticmethod
+    def _content_character_count(value: object) -> int:
+        """Count the transport representation without retaining or logging content."""
+        if isinstance(value, str):
+            return len(value)
+        if value is None:
+            return 0
+        try:
+            return len(
+                json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                )
+            )
+        except (TypeError, ValueError):
+            return 0
+
+    @classmethod
+    def _request_size_metrics(
+        cls,
+        messages: Sequence[ChatCompletionMessageParam],
+        *,
+        tools: Sequence[ChatCompletionToolParam] | None = None,
+        response_format: dict | None = None,
+    ) -> dict[str, int]:
+        """Return approximate message sizes without exposing their contents."""
+        system_characters = 0
+        user_characters = 0
+        total_characters = 0
+        for message in messages:
+            content_characters = cls._content_character_count(message.get("content"))
+            total_characters += content_characters
+            if message.get("role") == "system":
+                system_characters += content_characters
+            elif message.get("role") == "user":
+                user_characters += content_characters
+        schema = None
+        if isinstance(response_format, dict):
+            json_schema = response_format.get("json_schema")
+            if isinstance(json_schema, dict):
+                schema = json_schema.get("schema")
+        return {
+            "message_count": len(messages),
+            "characters_total": total_characters,
+            "system_characters": system_characters,
+            "user_characters": user_characters,
+            "tool_count": len(tools or ()),
+            "schema_characters": cls._content_character_count(schema),
+        }
+
+    def _log_request(
+        self,
+        request_arguments: dict,
+        *,
+        operation: str,
+        structured_output: bool,
+    ) -> dict[str, int]:
+        """Log effective request controls and return safe size metrics."""
+        messages = request_arguments["messages"]
+        metrics = self._request_size_metrics(
+            messages,
+            tools=request_arguments.get("tools"),
+            response_format=request_arguments.get("response_format"),
+        )
+        tool_choice = request_arguments.get("tool_choice")
+        safe_tool_choice = tool_choice if isinstance(tool_choice, str) else (
+            "configured" if tool_choice is not None else "none"
+        )
+        logger.debug(
+            "ai.pipeline.llm.request component=%s backend=%s operation=%s "
+            "model=%s timeout=%s "
+            "temperature=%s top_p=%s frequency_penalty=%s presence_penalty=%s "
+            "seed=%s tool_choice=%s tools=%s structured_output=%s messages=%s "
+            "characters_total=%s system_characters=%s user_characters=%s "
+            "schema_characters=%s context_configured=%s",
+            self._component.value,
+            type(self).__name__,
+            operation,
+            request_arguments["model"],
+            self._timeout,
+            request_arguments["temperature"],
+            request_arguments["top_p"],
+            request_arguments["frequency_penalty"],
+            request_arguments["presence_penalty"],
+            request_arguments.get("seed", "disabled"),
+            safe_tool_choice,
+            len(request_arguments.get("tools") or []),
+            structured_output,
+            metrics["message_count"],
+            metrics["characters_total"],
+            metrics["system_characters"],
+            metrics["user_characters"],
+            metrics["schema_characters"],
+            self._CONTEXT_CONFIGURATION,
+        )
+        return metrics
+
+    def _log_response(
+        self,
+        completion,
+        response: LLMChatResponse,
+        *,
+        operation: str,
+        structured_output: bool,
+        duration: float,
+        request_metrics: dict[str, int],
+    ) -> None:
+        """Log response metadata and token usage without model-generated content."""
+        usage = getattr(completion, "usage", None)
+        prompt_tokens = getattr(usage, "prompt_tokens", None)
+        completion_tokens = getattr(usage, "completion_tokens", None)
+        total_tokens = getattr(usage, "total_tokens", None)
+        usage_available = all(
+            isinstance(value, int)
+            for value in (prompt_tokens, completion_tokens, total_tokens)
+        )
+        logger.debug(
+            "ai.pipeline.llm.response component=%s backend=%s operation=%s duration=%.4f "
+            "finish_reason=%s tool_calls_present=%s tool_calls=%s "
+            "structured_output=%s usage_available=%s prompt_tokens=%s "
+            "completion_tokens=%s total_tokens=%s messages=%s "
+            "characters_total=%s system_characters=%s user_characters=%s "
+            "schema_characters=%s",
+            self._component.value,
+            type(self).__name__,
+            operation,
+            duration,
+            response.finish_reason or "unknown",
+            bool(response.tool_calls),
+            len(response.tool_calls),
+            structured_output,
+            usage_available,
+            prompt_tokens if usage_available else "unavailable",
+            completion_tokens if usage_available else "unavailable",
+            total_tokens if usage_available else "unavailable",
+            request_metrics["message_count"],
+            request_metrics["characters_total"],
+            request_metrics["system_characters"],
+            request_metrics["user_characters"],
+            request_metrics["schema_characters"],
+        )
+
+    def _log_failure(
+        self,
+        request_arguments: dict,
+        *,
+        operation: str,
+        structured_output: bool,
+        duration: float,
+        exc: Exception,
+    ) -> None:
+        """Log a failed request using only safe operational metadata."""
+        logger.debug(
+            "ai.pipeline.llm.response component=%s backend=%s operation=%s "
+            "status=failed duration=%.4f error_type=%s structured_output=%s "
+            "model=%s timeout=%s temperature=%s top_p=%s "
+            "frequency_penalty=%s presence_penalty=%s seed=%s",
+            self._component.value,
+            type(self).__name__,
+            operation,
+            duration,
+            type(exc).__name__,
+            structured_output,
+            request_arguments["model"],
+            self._timeout,
+            request_arguments["temperature"],
+            request_arguments["top_p"],
+            request_arguments["frequency_penalty"],
+            request_arguments["presence_penalty"],
+            request_arguments.get("seed", "unset"),
         )
 
     def _raise_mapped_error(self, exc: Exception) -> None:
@@ -157,19 +403,39 @@ class OllamaClient:
         tool_choice: ChatCompletionToolChoiceOptionParam | None = None,
     ) -> LLMChatResponse:
         """Send exactly one chat request and return a minimal typed response."""
-        request_arguments = {
-            "model": self._model,
-            "messages": messages,
-        }
-        if tools is not None:
-            request_arguments["tools"] = tools
-        if tool_choice is not None:
-            request_arguments["tool_choice"] = tool_choice
+        request_arguments = self._chat_request_arguments(
+            messages,
+            tools=tools,
+            tool_choice=tool_choice,
+        )
+        self._log_operational_parameters("inference", request_arguments)
+        request_metrics = self._log_request(
+            request_arguments,
+            operation="chat",
+            structured_output=False,
+        )
+        started_at = time.perf_counter()
         try:
             completion = await self._client.chat.completions.create(**request_arguments)
         except Exception as exc:
+            self._log_failure(
+                request_arguments,
+                operation="chat",
+                structured_output=False,
+                duration=time.perf_counter() - started_at,
+                exc=exc,
+            )
             self._raise_mapped_error(exc)
-        return self._extract_response(completion)
+        response = self._extract_response(completion)
+        self._log_response(
+            completion,
+            response,
+            operation="chat",
+            structured_output=False,
+            duration=time.perf_counter() - started_at,
+            request_metrics=request_metrics,
+        )
+        return response
 
     async def structured_chat(
         self,
@@ -185,16 +451,40 @@ class OllamaClient:
                 "schema": response_model.model_json_schema(),
             },
         }
+        request_arguments = self._chat_request_arguments(
+            messages,
+            response_format=response_format,
+        )
+        self._log_operational_parameters("structured_inference", request_arguments)
+        request_metrics = self._log_request(
+            request_arguments,
+            operation="structured_chat",
+            structured_output=True,
+        )
+        started_at = time.perf_counter()
         try:
             completion = await self._client.chat.completions.create(
-                model=self._model,
-                messages=messages,
-                response_format=response_format,
+                **request_arguments
             )
         except Exception as exc:
+            self._log_failure(
+                request_arguments,
+                operation="structured_chat",
+                structured_output=True,
+                duration=time.perf_counter() - started_at,
+                exc=exc,
+            )
             self._raise_mapped_error(exc)
 
         raw_response = self._extract_response(completion)
+        self._log_response(
+            completion,
+            raw_response,
+            operation="structured_chat",
+            structured_output=True,
+            duration=time.perf_counter() - started_at,
+            request_metrics=request_metrics,
+        )
         try:
             return response_model.model_validate_json(raw_response.content)
         except (ValidationError, ValueError) as exc:

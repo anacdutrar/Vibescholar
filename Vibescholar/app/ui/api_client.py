@@ -14,6 +14,10 @@ PORT = os.getenv("PORT", "8080")
 BASE_URL = os.getenv("API_BASE_URL") or f"http://127.0.0.1:{PORT}"
 HTTP_TIMEOUT = 30
 
+
+class EvidenceSearchConflictError(RuntimeError):
+    """Expose a safe conflict returned by the evidence-search endpoint."""
+
 def _client(cookies: Optional[Dict[str, str]] = None) -> httpx.Client:
     return httpx.Client(base_url=BASE_URL, cookies=cookies or {}, timeout=HTTP_TIMEOUT)
 
@@ -395,6 +399,15 @@ def api_search_evidence(cookies: Dict[str, str], sentence_id: int) -> List[Dict]
 async def api_search_evidence_async(cookies: Dict[str, str], sentence_id: int) -> List[Dict]:
     async with _async_client(cookies) as c:
         r = await c.post("/api/sentences/search/evidence", json={"sentence_id": sentence_id})
+        if r.status_code == 409:
+            try:
+                detail = r.json().get("detail")
+            except (ValueError, AttributeError):
+                detail = None
+            raise EvidenceSearchConflictError(
+                detail
+                or "Já existe uma busca de evidências em andamento para esta sentença."
+            )
         r.raise_for_status()
         return r.json()
 

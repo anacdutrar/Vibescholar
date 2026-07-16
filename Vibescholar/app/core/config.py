@@ -27,6 +27,22 @@ def _unit_interval(name: str, default: float) -> float:
     return value
 
 
+def _bounded_float(name: str, default: float, minimum: float, maximum: float) -> float:
+    """Read a floating-point value constrained to an inclusive range."""
+    value = float(os.getenv(name, str(default)))
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+def _optional_int(name: str) -> int | None:
+    """Read an optional integer, treating an absent or blank value as disabled."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return None
+    return int(raw)
+
+
 def _provider_order() -> tuple[str, ...]:
     """Read a non-empty, unique provider precedence list."""
     raw = os.getenv("SEARCH_PROVIDER_ORDER", "openalex,semantic_scholar")
@@ -54,7 +70,12 @@ class Settings:
     OPENROUTER_BASE_URL: str = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
     OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
     OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "")
-    LLM_TIMEOUT_SECONDS: int = _positive_int("LLM_TIMEOUT_SECONDS", 60)
+    LLM_TIMEOUT_SECONDS: int = _positive_int("LLM_TIMEOUT_SECONDS", 1200)
+    LLM_TEMPERATURE: float
+    LLM_TOP_P: float
+    LLM_FREQUENCY_PENALTY: float
+    LLM_PRESENCE_PENALTY: float
+    LLM_SEED: int | None
     MAX_SEARCH_ROUNDS: int = _positive_int("MAX_SEARCH_ROUNDS", 3)
     MAX_TOOL_CALLS_PER_ROUND: int = _positive_int("MAX_TOOL_CALLS_PER_ROUND", 1)
     RESULTS_PER_PROVIDER: int = _positive_int("RESULTS_PER_PROVIDER", 15)
@@ -76,6 +97,18 @@ class Settings:
     ACADEMIC_PROVIDER_TIMEOUT_SECONDS: float = _positive_float(
         "ACADEMIC_PROVIDER_TIMEOUT_SECONDS", 15.0
     )
+
+    def __init__(self) -> None:
+        """Read inference controls when a settings instance is created."""
+        self.LLM_TEMPERATURE = _bounded_float("LLM_TEMPERATURE", 0.1, 0.0, 2.0)
+        self.LLM_TOP_P = _bounded_float("LLM_TOP_P", 0.9, 0.0, 1.0)
+        self.LLM_FREQUENCY_PENALTY = _bounded_float(
+            "LLM_FREQUENCY_PENALTY", 0.0, -2.0, 2.0
+        )
+        self.LLM_PRESENCE_PENALTY = _bounded_float(
+            "LLM_PRESENCE_PENALTY", 0.0, -2.0, 2.0
+        )
+        self.LLM_SEED = _optional_int("LLM_SEED")
 
     def __repr__(self) -> str:
         """Return a diagnostic representation that never includes secret values."""

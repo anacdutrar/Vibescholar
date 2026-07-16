@@ -1,6 +1,7 @@
 """Initial and refinement academic-search decisions over one injected LLM client."""
 
 import json
+import time
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -201,6 +202,13 @@ class SearchAgent:
         allow_citation_resolution: bool,
     ) -> SearchToolExecutionOutcome:
         """Run exactly one inference and execute at most one authorized tool."""
+        started_at = time.perf_counter()
+        decision_kind = "initial" if allow_citation_resolution else "refinement"
+        logger.info(
+            "ai.pipeline.search_agent.started decision=%s tool_count=%s",
+            decision_kind,
+            len(self._tool_definitions()),
+        )
         response = await self._client.chat(
             messages,
             tools=self._tool_definitions(),
@@ -223,11 +231,18 @@ class SearchAgent:
                 raise LLMResponseValidationError(
                     "A no-tool decision must use should_search=false and selected_tool=none."
                 )
-            return SearchToolExecutionOutcome(
+            outcome = SearchToolExecutionOutcome(
                 sentence_type=plan.sentence_type,
                 action_taken=SearchToolName.NONE,
                 reason=plan.reason,
             )
+            logger.info(
+                "ai.pipeline.search_agent.completed decision=%s action=none tool_called=false "
+                "duration=%.4f termination=no_action",
+                decision_kind,
+                time.perf_counter() - started_at,
+            )
+            return outcome
 
         sdk_call = response.tool_calls[0]
 
@@ -265,7 +280,7 @@ class SearchAgent:
         except ToolUnavailableError:
             raise
 
-        return SearchToolExecutionOutcome(
+        outcome = SearchToolExecutionOutcome(
             sentence_type=sentence_type,
             action_taken=tool_name,
             tool_call_id=sdk_call.tool_call_id,
@@ -273,3 +288,13 @@ class SearchAgent:
             reason=tool_execution.to_public_result().message,
             tool_call=call_record,
         )
+        public_result = tool_execution.to_public_result()
+        logger.info(
+            "ai.pipeline.search_agent.completed decision=%s action=%s tool_called=true "
+            "status=%s duration=%.4f termination=tool_completed",
+            decision_kind,
+            tool_name.value,
+            public_result.status.value,
+            time.perf_counter() - started_at,
+        )
+        return outcome

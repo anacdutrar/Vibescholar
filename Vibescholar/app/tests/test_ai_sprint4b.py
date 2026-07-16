@@ -160,8 +160,12 @@ def test_academic_executor_runs_providers_concurrently_once():
 def test_academic_executor_requires_exactly_one_query():
     async def scenario():
         executor = AcademicSearchExecutor(ProviderStub("openalex"), ProviderStub("semantic"))
+        invalid_request = AcademicSearchInput.model_construct(
+            queries=["first", "second"],
+            limit_per_provider=5,
+        )
         with pytest.raises(ToolArgumentsValidationError):
-            await executor.execute(academic_request(["first", "second"]))
+            await executor.execute(invalid_request)
 
     run(scenario())
 

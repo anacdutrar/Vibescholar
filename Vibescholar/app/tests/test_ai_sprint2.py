@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from app.agents.schemas import CitationHint, SearchPlan
 from app.agents.search_agent import SearchAgent
+from app.core.config import settings
 from app.llm.exceptions import (
     LLMConnectionError,
     LLMError,
@@ -301,6 +302,32 @@ def test_real_sdk_configuration_disables_retries_without_network_access():
         client = OllamaClient()
         try:
             assert client._client.max_retries == 0
+        finally:
+            await client._client.close()
+
+    run(scenario())
+
+
+def test_real_sdk_uses_ollama_placeholder_when_api_key_is_empty(monkeypatch):
+    async def scenario():
+        monkeypatch.setattr(settings, "OLLAMA_API_KEY", "")
+        client = OllamaClient()
+        try:
+            assert client._client.api_key == "ollama"
+        finally:
+            await client._client.close()
+
+    run(scenario())
+
+
+def test_real_sdk_preserves_configured_ollama_api_key(monkeypatch):
+    async def scenario():
+        configured_key = "configured-ollama-key"
+        monkeypatch.setattr(settings, "OLLAMA_API_KEY", configured_key)
+        client = OllamaClient()
+        try:
+            assert client._client.api_key == configured_key
+            assert configured_key not in repr(client)
         finally:
             await client._client.close()
 

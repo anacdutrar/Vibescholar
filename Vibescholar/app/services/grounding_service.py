@@ -1,5 +1,6 @@
 from fastapi import Depends, HTTPException
 import re
+import time
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from typing import List, Dict, Any
@@ -86,6 +87,7 @@ class GroundingService:
         sentence_id: int,
         user_id: int,
     ) -> List[EvidenceSuggestionOut]:
+        started_at = time.perf_counter()
         # Fetch sentence
         sentence = self.db.query(Sentence).filter(Sentence.id == sentence_id).first()
         if not sentence:
@@ -115,15 +117,15 @@ class GroundingService:
         }
         citation_hints = extract_citation_hints(sentence.text)
         logger.info(
-            "evidence.search.citation sentence_id=%s pattern=%s",
+            "evidence.search.citation sentence_id=%s detected=%s",
             sentence.id,
-            citation_hints.get("raw") if citation_hints else None,
+            citation_hints is not None,
         )
 
         # Call EvidenceService search
         evidence_service = EvidenceService()
         try:
-            return await evidence_service.search(
+            suggestions = await evidence_service.search(
                 self.db,
                 sentence.text,
                 doc.project_id,
@@ -135,6 +137,15 @@ class GroundingService:
                 ),
                 excluded_reference_ids=terminal_reference_ids,
             )
+            logger.info(
+                "ai.pipeline.grounding_service.completed sentence_id=%s suggestions=%s "
+                "duration=%.4f termination=%s",
+                sentence.id,
+                len(suggestions),
+                time.perf_counter() - started_at,
+                "suggestions_returned" if suggestions else "no_suggestions",
+            )
+            return suggestions
         except IntegrityError:
             self.db.rollback()
             logger.warning(

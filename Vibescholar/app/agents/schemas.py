@@ -57,7 +57,14 @@ class SearchPlan(BaseModel):
     selected_tool: SearchToolName = Field(description="Single conceptual tool selected for this round.")
     topic: str | None = Field(default=None, description="Concise academic topic extracted from the sentence.")
     tags: list[str] = Field(default_factory=list, description="Academic concepts useful for retrieval and filtering.")
-    queries: list[str] = Field(default_factory=list, description="Unique academic queries proposed for this round.")
+    queries: list[str] = Field(
+        default_factory=list,
+        max_length=1,
+        description=(
+            "Exactly one principal academic query for academic search, or an empty "
+            "list when the selected action does not require one."
+        ),
+    )
     citation_hints: list[CitationHint] = Field(
         default_factory=list,
         description="Citation fragments that may be resolved to bibliographic metadata.",
@@ -95,8 +102,8 @@ class SearchPlan(BaseModel):
         if self.selected_tool is SearchToolName.NONE:
             raise ValueError("should_search=true requires a search tool")
         if self.selected_tool is SearchToolName.SEARCH_ACADEMIC_WORKS:
-            if not 1 <= len(self.queries) <= 5:
-                raise ValueError("search_academic_works requires between one and five queries")
+            if len(self.queries) != 1:
+                raise ValueError("search_academic_works requires exactly one academic query")
         elif (
             self.selected_tool is SearchToolName.RESOLVE_CITATION_METADATA
             and not self.queries

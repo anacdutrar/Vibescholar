@@ -172,7 +172,7 @@ def test_qwen_selects_academic_search_and_backend_executes_once():
                 function_call(
                     "call-academic",
                     "search_academic_works",
-                    {"queries": [" scientific writing ", "research methodology"], "limit_per_provider": 4},
+                    {"queries": [" scientific writing "], "limit_per_provider": 4},
                 )
             ],
         )

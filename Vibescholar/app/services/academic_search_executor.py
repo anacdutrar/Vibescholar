@@ -1,8 +1,10 @@
 """Concrete concurrent execution of one academic-search query."""
 
 import asyncio
+import time
 
 from app.core.config import settings
+from app.core.logging import logger
 from app.llm.exceptions import (
     AcademicProviderError,
     ToolArgumentsValidationError,
@@ -47,6 +49,13 @@ class AcademicSearchExecutor:
         if not providers:
             raise ToolUnavailableError("No academic search provider is enabled.")
 
+        started_at = time.perf_counter()
+        logger.info(
+            "ai.pipeline.executor.started executor=academic_search providers=%s "
+            "query_count=1 limit=%s",
+            len(providers),
+            effective_limit,
+        )
         query = validated.queries[0]
         outcomes = await asyncio.gather(
             *(provider.search_works(query, effective_limit) for _, provider in providers),
@@ -82,7 +91,7 @@ class AcademicSearchExecutor:
 
         candidates = deduplicate_reference_candidates(raw_candidates)
         status = self._status(summaries, bool(candidates))
-        return AcademicSearchExecutionResult(
+        result = AcademicSearchExecutionResult(
             candidates=candidates,
             public_result=AcademicSearchToolResult(
                 status=status,
@@ -94,6 +103,17 @@ class AcademicSearchExecutor:
                 effective_limit_per_provider=effective_limit,
             ),
         )
+        logger.info(
+            "ai.pipeline.executor.completed executor=academic_search status=%s "
+            "providers=%s provider_failures=%s raw=%s deduplicated=%s duration=%.4f",
+            status.value,
+            len(summaries),
+            sum(not summary.success for summary in summaries),
+            len(raw_candidates),
+            len(candidates),
+            time.perf_counter() - started_at,
+        )
+        return result
 
     def _ordered_providers(self) -> list[tuple[str, object]]:
         """Resolve only the two explicit providers in configured order."""

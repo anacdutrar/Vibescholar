@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Iterable
 
 from sqlalchemy.orm import Session
@@ -48,6 +49,7 @@ class EvidenceService:
         excluded_reference_ids: set[int] | None = None,
     ) -> list[EvidenceSuggestionOut]:
         """Return the existing public suggestion contract for one sentence search."""
+        started_at = time.perf_counter()
         self._validate_input(
             sentence_text, project_id, user_id, document_version_id, sentence_uuid
         )
@@ -56,8 +58,19 @@ class EvidenceService:
             project_settings = ProjectSettingsRepository.create_default(db, project_id)
 
         excluded = excluded_reference_ids or set()
+        mode = "mock" if settings.USE_MOCK else "real"
+        logger.info(
+            "ai.pipeline.evidence_service.started mode=%s user_id=%s project_id=%s "
+            "version_id=%s citation_hints=%s excluded_references=%s",
+            mode,
+            user_id,
+            project_id,
+            document_version_id,
+            len(citation_hints or []),
+            len(excluded),
+        )
         if settings.USE_MOCK:
-            return self._search_mock(
+            suggestions = self._search_mock(
                 db,
                 sentence_text,
                 project_id,
@@ -67,6 +80,14 @@ class EvidenceService:
                 citation_hints or [],
                 excluded,
             )
+            logger.info(
+                "ai.pipeline.evidence_service.completed mode=mock suggestions=%s "
+                "duration=%.4f termination=%s",
+                len(suggestions),
+                time.perf_counter() - started_at,
+                "suggestions_returned" if suggestions else "no_suggestions",
+            )
+            return suggestions
 
         workflow, session_store = self._real_runtime()
         result = await workflow.execute_round(
@@ -81,7 +102,18 @@ class EvidenceService:
                 only_open_access=project_settings.only_open_access,
             ),
         )
-        return await self._persist_real_result(
+        logger.info(
+            "ai.pipeline.evidence_service.workflow_result source=%s status=%s round=%s "
+            "evaluated=%s strong=%s partial=%s failure_code=%s",
+            result.source.value,
+            result.session_status.value,
+            result.round_number,
+            result.evaluation_summary.evaluated_candidates,
+            result.evaluation_summary.strong_support_count,
+            result.evaluation_summary.partial_support_count,
+            result.failure_code or "none",
+        )
+        suggestions = await self._persist_real_result(
             db=db,
             session_store=session_store,
             key=(user_id, document_version_id, sentence_uuid),
@@ -91,6 +123,16 @@ class EvidenceService:
             max_suggestions=project_settings.max_suggestions,
             result=result,
         )
+        logger.info(
+            "ai.pipeline.evidence_service.completed mode=real suggestions=%s duration=%.4f "
+            "termination=%s source=%s status=%s",
+            len(suggestions),
+            time.perf_counter() - started_at,
+            "suggestions_returned" if suggestions else "no_public_suggestions",
+            result.source.value,
+            result.session_status.value,
+        )
+        return suggestions
 
     def _real_runtime(self) -> tuple[EvidenceSearchWorkflow, EvidenceSearchSessionStore]:
         if self._workflow is not None and self._session_store is not None:
@@ -131,12 +173,14 @@ class EvidenceService:
                     session.candidates[candidate_key] = session.candidates[
                         candidate_key
                     ].model_copy(update={"persisted_reference_id": reference.id})
-            except Exception:
+            except Exception as exc:
                 db.rollback()
-                logger.exception(
-                    "evidence.real.reference_persistence_rollback project_id=%s version_id=%s",
+                logger.warning(
+                    "ai.pipeline.evidence_service.failed stage=reference_persistence "
+                    "project_id=%s version_id=%s error_type=%s rollback=true",
                     project_id,
                     document_version_id,
+                    type(exc).__name__,
                 )
                 raise
 
@@ -177,12 +221,13 @@ class EvidenceService:
                     for item in self._unique_suggestions([*approved, *staged])
                 ]
                 db.commit()
-            except Exception:
+            except Exception as exc:
                 db.rollback()
-                logger.exception(
-                    "evidence.real.public_persistence_rollback version_id=%s sentence_uuid=%s",
+                logger.warning(
+                    "ai.pipeline.evidence_service.failed stage=suggestion_persistence "
+                    "version_id=%s error_type=%s rollback=true",
                     document_version_id,
-                    sentence_uuid,
+                    type(exc).__name__,
                 )
                 raise
 

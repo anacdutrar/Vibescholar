@@ -272,6 +272,29 @@ def _sentence_evidence_action_label(sentence: dict, ignored_citations: set[int])
     return "Buscar evidências"
 
 
+async def _run_evidence_action_once(
+    sentence_id: int,
+    searches_in_progress: set[int],
+    button,
+    action,
+) -> bool:
+    """Run one evidence request per sentence and always restore its button."""
+    if sentence_id in searches_in_progress:
+        return False
+
+    searches_in_progress.add(sentence_id)
+    original_text = button.text
+    button.disable()
+    button.set_text("Buscando evidências...")
+    try:
+        await action()
+        return True
+    finally:
+        searches_in_progress.discard(sentence_id)
+        button.set_text(original_text)
+        button.enable()
+
+
 def _transition_citation_review_state(
     sentence: dict,
     new_state: str,
@@ -900,6 +923,7 @@ async def _right_panel(
                 )
             else:
                 ignored_citations: set[int] = set()
+                evidence_searches_in_progress: set[int] = set()
                 options = _paragraph_filter_options(sentences)
                 view_state = {
                     "filter": _initial_paragraph_filter(sentences),
@@ -971,20 +995,37 @@ async def _right_panel(
                                 )
 
                             async def search_ev() -> None:
-                                await _evidence_panel(sent, doc, refresh_card_and_grounding)
+                                await _run_evidence_action_once(
+                                    sent["id"],
+                                    evidence_searches_in_progress,
+                                    action_button,
+                                    lambda: _evidence_panel(
+                                        sent,
+                                        doc,
+                                        refresh_card_and_grounding,
+                                        evidence_searches_in_progress,
+                                    ),
+                                )
 
                             async def review_citation() -> None:
-                                await _citation_review_dialog(
-                                    sent,
-                                    doc,
-                                    citation,
-                                    ignored_citations,
-                                    refresh_card_and_grounding,
+                                await _run_evidence_action_once(
+                                    sent["id"],
+                                    evidence_searches_in_progress,
+                                    action_button,
+                                    lambda: _citation_review_dialog(
+                                        sent,
+                                        doc,
+                                        citation,
+                                        ignored_citations,
+                                        refresh_card_and_grounding,
+                                    ),
                                 )
 
                             action_label = _sentence_evidence_action_label(sent, ignored_citations)
                             action_callback = review_citation if citation_needs_review else search_ev
-                            ui.button(action_label, on_click=action_callback).style(
+                            action_button = ui.button(
+                                action_label, on_click=action_callback
+                            ).style(
                                 "background:rgba(99,102,241,.12); border:1px solid rgba(99,102,241,.25); "
                                 "color:#818cf8; border-radius:6px; font-size:11px; padding:4px 12px; margin-top:8px;"
                             )
@@ -1320,8 +1361,15 @@ async def _citation_review_dialog(
     dialog.open()
 
 
-async def _evidence_panel(sentence: dict, doc: dict, refresh_fn) -> None:
+async def _evidence_panel(
+    sentence: dict,
+    doc: dict,
+    refresh_fn,
+    searches_in_progress: set[int] | None = None,
+) -> None:
     """Opens evidence suggestions dialog for a sentence."""
+    if searches_in_progress is None:
+        searches_in_progress = set()
     suggestions_state = {"items": [], "error": None}
     try:
         suggestions_state["items"] = await api.api_search_evidence_async(
@@ -1359,15 +1407,27 @@ async def _evidence_panel(sentence: dict, doc: dict, refresh_fn) -> None:
             if not pending:
                 async def search_more() -> None:
                     try:
-                        suggestions_state["items"] = await api.api_search_evidence_async(
-                            state.get_cookies(), sentence["id"]
+                        async def request_more() -> None:
+                            suggestions_state["items"] = (
+                                await api.api_search_evidence_async(
+                                    state.get_cookies(), sentence["id"]
+                                )
+                            )
+
+                        await _run_evidence_action_once(
+                            sentence["id"],
+                            searches_in_progress,
+                            search_more_button,
+                            request_more,
                         )
                         suggestions_state["error"] = None
                     except Exception as exc:
                         suggestions_state["error"] = str(exc)[:80]
                     evidence_content.refresh()
 
-                ui.button("Buscar mais sugestões", on_click=search_more).classes("vs-btn-ghost").style("margin-top:8px;")
+                search_more_button = ui.button(
+                    "Buscar mais sugestões", on_click=search_more
+                ).classes("vs-btn-ghost").style("margin-top:8px;")
             if not suggestions:
                 ui.label("Nenhuma sugestão encontrada para esta sentença.").style("font-size:14px; color:#8b90a0;")
             if rejected:
