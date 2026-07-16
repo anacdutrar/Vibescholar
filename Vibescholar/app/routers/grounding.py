@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 import time
-from typing import List
+from typing import List, Literal
 from pydantic import BaseModel
 
 from app.routers.auth import get_current_user
@@ -111,6 +111,22 @@ async def search_sentence_evidence(
             status_code=409,
             detail="Já existe uma busca de evidências em andamento para esta sentença.",
         ) from None
+
+@router.get(
+    "/api/sentences/{sentence_id}/evidence-suggestions",
+    response_model=List[EvidenceSuggestionOut],
+)
+def list_sentence_evidence_suggestions(
+    sentence_id: int,
+    status: Literal["PENDING"] = "PENDING",
+    current_user = Depends(get_current_user),
+    grounding_service: GroundingService = Depends(),
+):
+    """Return persisted pending suggestions without starting an evidence search."""
+    return grounding_service.list_pending_evidence_suggestions(
+        sentence_id,
+        current_user.id,
+    )
 
 @router.put("/api/evidence-suggestions/{suggestion_id}", response_model=EvidenceSuggestionOut)
 def update_suggestion_status(

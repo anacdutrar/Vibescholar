@@ -93,6 +93,11 @@ class OllamaClient:
             f"component={self._component.value!r}, api_key=<redacted>)"
         )
 
+    @property
+    def model_name(self) -> str:
+        """Return the non-sensitive configured model identifier."""
+        return self._model
+
     @staticmethod
     def _openai_base_url(base_url: str) -> str:
         normalized = base_url.strip().rstrip("/")

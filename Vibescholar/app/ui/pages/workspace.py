@@ -363,6 +363,11 @@ def _sentence_evidence_action_label(sentence: dict, ignored_citations: set[int])
     return "Buscar evidências"
 
 
+def _element_is_active(element) -> bool:
+    """Return whether a NiceGUI element may still be safely updated."""
+    return not bool(getattr(element, "is_deleted", False))
+
+
 async def _run_evidence_action_once(
     sentence_id: int,
     searches_in_progress: set[int],
@@ -382,8 +387,9 @@ async def _run_evidence_action_once(
         return True
     finally:
         searches_in_progress.discard(sentence_id)
-        button.set_text(original_text)
-        button.enable()
+        if _element_is_active(button):
+            button.set_text(original_text)
+            button.enable()
 
 
 async def _synchronize_evidence_suggestions(
@@ -409,6 +415,43 @@ async def _synchronize_evidence_suggestions(
             await loading_indicator.stop()
         if loading_indicator is None or loading_indicator.visible:
             refresh()
+
+
+async def _load_pending_or_search_evidence_suggestions(
+    suggestions_state: dict,
+    pending_request,
+    search_request,
+    refresh,
+    loading_indicator: _EvidenceLoadingIndicator | None = None,
+) -> bool:
+    """Read persisted pending suggestions before starting one new AI search."""
+    suggestions_state.update(status="checking", items=[], error=None)
+    if loading_indicator is None or loading_indicator.visible:
+        refresh()
+    try:
+        pending = await pending_request()
+    except Exception as exc:
+        suggestions_state.update(
+            status="error",
+            error=str(exc)[:80],
+        )
+        if loading_indicator is None or loading_indicator.visible:
+            refresh()
+        return False
+
+    if pending:
+        suggestions_state.update(status="success", items=pending, error=None)
+        if loading_indicator is None or loading_indicator.visible:
+            refresh()
+        return False
+
+    await _synchronize_evidence_suggestions(
+        suggestions_state,
+        search_request,
+        refresh,
+        loading_indicator,
+    )
+    return True
 
 
 def _evidence_search_finished_empty(suggestions_state: dict) -> bool:
@@ -1119,20 +1162,19 @@ async def _right_panel(
                                 )
 
                             async def search_ev() -> None:
-                                async def search_and_refresh() -> None:
+                                async def open_evidence_dialog() -> None:
                                     await _evidence_panel(
                                         sent,
                                         doc,
                                         refresh_card_and_grounding,
                                         evidence_searches_in_progress,
                                     )
-                                    await refresh_card_and_grounding()
 
                                 await _run_evidence_action_once(
                                     sent["id"],
                                     evidence_searches_in_progress,
                                     action_button,
-                                    search_and_refresh,
+                                    open_evidence_dialog,
                                 )
 
                             async def review_citation() -> None:
@@ -1499,7 +1541,7 @@ async def _evidence_panel(
     if searches_in_progress is None:
         searches_in_progress = set()
     suggestions_state = {
-        "status": "loading",
+        "status": "checking",
         "items": [],
         "error": None,
         "elapsed_seconds": 0,
@@ -1517,6 +1559,14 @@ async def _evidence_panel(
 
         @ui.refreshable
         def evidence_content() -> None:
+            if suggestions_state["status"] == "checking":
+                with ui.row().style("align-items:center; gap:10px;"):
+                    ui.spinner(size="sm", color="indigo")
+                    ui.label("Verificando sugestões pendentes...").style(
+                        "font-size:13px; color:#b8bdcc;"
+                    )
+                return
+
             if suggestions_state["status"] == "loading":
                 with ui.row().style("align-items:flex-start; gap:12px;"):
                     ui.spinner(size="sm", color="indigo")
@@ -1559,14 +1609,15 @@ async def _evidence_panel(
                         )
 
                     async def synchronize_more() -> None:
-                        await _synchronize_evidence_suggestions(
+                        await _load_pending_or_search_evidence_suggestions(
                             suggestions_state,
+                            lambda: api.api_list_pending_evidence_suggestions_async(
+                                state.get_cookies(), sentence["id"]
+                            ),
                             request_more,
                             evidence_content.refresh,
                             loading_indicator,
                         )
-                        if suggestions_state["status"] == "success":
-                            await refresh_fn()
 
                     await _run_evidence_action_once(
                         sentence["id"],
@@ -1591,8 +1642,11 @@ async def _evidence_panel(
         evidence_content()
         ui.button("Fechar", on_click=dlg.close).classes("vs-btn-ghost").style("width:100%; margin-top:16px;")
     dlg.open()
-    await _synchronize_evidence_suggestions(
+    await _load_pending_or_search_evidence_suggestions(
         suggestions_state,
+        lambda: api.api_list_pending_evidence_suggestions_async(
+            state.get_cookies(), sentence["id"]
+        ),
         lambda: api.api_search_evidence_async(
             state.get_cookies(), sentence["id"]
         ),

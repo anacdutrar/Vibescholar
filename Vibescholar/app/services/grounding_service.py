@@ -158,6 +158,34 @@ class GroundingService:
                 detail="Não foi possível preparar as referências de evidência.",
             )
 
+    def list_pending_evidence_suggestions(
+        self,
+        sentence_id: int,
+        user_id: int,
+    ) -> List[EvidenceSuggestionOut]:
+        """Return persisted pending suggestions without invoking the AI workflow."""
+        sentence = self.db.query(Sentence).filter(Sentence.id == sentence_id).first()
+        if not sentence:
+            raise HTTPException(status_code=404, detail="Sentença não encontrada.")
+
+        version = self.doc_repo.get_version_by_id(self.db, sentence.document_version_id)
+        if not version:
+            raise HTTPException(status_code=404, detail="Versão do documento não encontrada.")
+        self._verify_document_ownership(version.document_id, user_id)
+
+        suggestions = ReferenceRepository.get_pending_suggestions_by_version_and_sentence(
+            self.db,
+            version.id,
+            sentence.sentence_uuid,
+        )
+        logger.info(
+            "evidence.pending.list sentence_id=%s version_id=%s count=%s",
+            sentence.id,
+            version.id,
+            len(suggestions),
+        )
+        return [EvidenceSuggestionOut.model_validate(item) for item in suggestions]
+
     def update_suggestion_status(self, suggestion_id: int, status: str, user_id: int) -> EvidenceSuggestion:
         sug = ReferenceRepository.get_suggestion_by_id(self.db, suggestion_id)
         if not sug:

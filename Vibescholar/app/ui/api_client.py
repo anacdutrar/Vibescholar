@@ -418,6 +418,19 @@ async def api_search_evidence_async(cookies: Dict[str, str], sentence_id: int) -
         return r.json()
 
 
+async def api_list_pending_evidence_suggestions_async(
+    cookies: Dict[str, str],
+    sentence_id: int,
+) -> List[Dict]:
+    async with _async_client(cookies) as c:
+        r = await c.get(
+            f"/api/sentences/{sentence_id}/evidence-suggestions",
+            params={"status": "PENDING"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+
 def api_update_suggestion_status(cookies: Dict[str, str], suggestion_id: int, status: str) -> Dict:
     with _client(cookies) as c:
         r = c.put(f"/api/evidence-suggestions/{suggestion_id}", json={"status": status})

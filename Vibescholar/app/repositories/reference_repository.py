@@ -221,6 +221,23 @@ class ReferenceRepository:
         ).all()
 
     @staticmethod
+    def get_pending_suggestions_by_version_and_sentence(
+        db: Session, version_id: int, sentence_uuid: str
+    ) -> List[EvidenceSuggestion]:
+        """Return only pending suggestions with references loaded for public review."""
+        return (
+            db.query(EvidenceSuggestion)
+            .options(joinedload(EvidenceSuggestion.reference))
+            .filter(
+                EvidenceSuggestion.document_version_id == version_id,
+                EvidenceSuggestion.sentence_uuid == sentence_uuid,
+                EvidenceSuggestion.status == "PENDING",
+            )
+            .order_by(EvidenceSuggestion.created_at, EvidenceSuggestion.id)
+            .all()
+        )
+
+    @staticmethod
     def get_suggestion_by_version_and_sentence_and_ref(
         db: Session, version_id: int, sentence_uuid: str, ref_id: int
     ) -> Optional[EvidenceSuggestion]:

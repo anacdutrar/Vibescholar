@@ -29,7 +29,7 @@ from app.agents.schemas import SearchToolName, SentenceType
 
 
 class SearchAgent:
-    """Produce initial plans and single-inference native tool decisions."""
+    """Produce native tool decisions with structured no-tool validation."""
 
     MAX_SENTENCE_CHARACTERS = 12_000
 
@@ -171,7 +171,7 @@ class SearchAgent:
         academic_search_executor: AcademicSearchExecutor | None = None,
         citation_resolution_executor: CitationResolutionExecutor | None = None,
     ) -> SearchToolExecutionOutcome:
-        """Perform one inference and execute at most one validated function tool."""
+        """Execute at most one tool and validate a no-tool result as SearchPlan."""
         self._validate_input(sentence)
         hints = citation_hints or []
         messages = self._build_messages(sentence, hints)
@@ -190,7 +190,7 @@ class SearchAgent:
         academic_search_executor: AcademicSearchExecutor | None = None,
         citation_resolution_executor: CitationResolutionExecutor | None = None,
     ) -> SearchToolExecutionOutcome:
-        """Perform one native tool-calling inference for an academic refinement round."""
+        """Perform one native refinement tool decision with structured no-tool validation."""
         self._validate_input(sentence)
         summary = SearchRoundSummary.model_validate(previous_round)
         messages = self._build_refinement_messages(sentence, summary)
@@ -209,7 +209,7 @@ class SearchAgent:
         citation_resolution_executor: CitationResolutionExecutor | None,
         allow_citation_resolution: bool,
     ) -> SearchToolExecutionOutcome:
-        """Run exactly one inference and execute at most one authorized tool."""
+        """Run one tool inference and, only when absent, one structured plan inference."""
         started_at = time.perf_counter()
         decision_kind = "initial" if allow_citation_resolution else "refinement"
         logger.info(
@@ -227,17 +227,29 @@ class SearchAgent:
             raise MultipleToolCallsError("The model returned more than one tool call.")
 
         if not response.tool_calls:
-            if not isinstance(response.content, str):
-                raise LLMResponseValidationError("A no-tool decision requires a SearchPlan response.")
+            logger.info(
+                "ai.pipeline.search_agent.plan decision=%s operation=structured_plan "
+                "backend=%s model=%s structured_output=true",
+                decision_kind,
+                type(self._client).__name__,
+                getattr(self._client, "model_name", "configured"),
+            )
             try:
-                plan = SearchPlan.model_validate_json(response.content)
+                plan = await self._client.structured_chat(messages, SearchPlan)
+            except LLMResponseValidationError:
+                raise
             except (ValidationError, ValueError) as exc:
                 raise LLMResponseValidationError(
                     "The no-tool decision does not satisfy SearchPlan."
                 ) from exc
+            if not isinstance(plan, SearchPlan):
+                raise LLMResponseValidationError(
+                    "The structured no-tool decision did not return SearchPlan."
+                )
             if plan.should_search or plan.selected_tool is not SearchToolName.NONE:
                 raise LLMResponseValidationError(
-                    "A no-tool decision must use should_search=false and selected_tool=none."
+                    "A structured no-tool decision must use should_search=false "
+                    "and selected_tool=none."
                 )
             outcome = SearchToolExecutionOutcome(
                 sentence_type=plan.sentence_type,

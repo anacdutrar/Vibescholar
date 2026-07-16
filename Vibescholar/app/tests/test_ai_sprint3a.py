@@ -239,7 +239,11 @@ def test_no_tool_call_requires_no_action_plan_and_executes_nothing():
         assert outcome.execution_status.value == "not_called"
         academic.assert_not_awaited()
         citation.assert_not_awaited()
-        assert len(sdk.completions.calls) == 1
+        assert len(sdk.completions.calls) == 2
+        assert "response_format" not in sdk.completions.calls[0]
+        assert sdk.completions.calls[1]["response_format"]["json_schema"]["schema"] == (
+            SearchPlan.model_json_schema()
+        )
 
     run(scenario())
 

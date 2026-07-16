@@ -7,6 +7,7 @@ from app.ui import api_client
 from app.ui.pages.workspace import (
     _evidence_panel,
     _evidence_search_finished_empty,
+    _load_pending_or_search_evidence_suggestions,
     _run_evidence_action_once,
     _synchronize_evidence_suggestions,
 )
@@ -176,7 +177,7 @@ def test_dialog_opens_before_awaiting_pipeline_and_refreshes_afterward():
     source = inspect.getsource(_evidence_panel)
 
     assert source.index("dlg.open()") < source.rindex(
-        "await _synchronize_evidence_suggestions"
+        "await _load_pending_or_search_evidence_suggestions"
     )
     assert '"Buscando evidências..."' in source
     assert "_evidence_search_finished_empty(suggestions_state)" in source

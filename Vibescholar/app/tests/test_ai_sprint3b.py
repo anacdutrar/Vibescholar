@@ -130,6 +130,9 @@ class DecisionClient:
         self.calls.append({"messages": messages, "tools": tools, "tool_choice": tool_choice})
         return self.response
 
+    async def structured_chat(self, messages, response_model):
+        return response_model.model_validate_json(self.response.content)
+
 
 def tool_response(name: str, arguments: dict, call_id: str = "call-3b") -> LLMChatResponse:
     """Build one typed transport response containing a real tool call."""
