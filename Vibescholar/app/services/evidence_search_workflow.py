@@ -3,6 +3,11 @@
 Future composition is expected to be Router -> EvidenceService ->
 EvidenceSearchWorkflow. EvidenceService remains the public facade; this module
 coordinates only transient AI search state and never accesses ORM or UI layers.
+
+For the MVP, a semantic ``none`` decision is reported as ``NO_ACTION`` while
+the in-memory session becomes ``EXHAUSTED``. Here ``EXHAUSTED`` only means that
+the session ended without another available round; it does not claim that every
+possible academic search strategy was attempted.
 """
 
 import time
@@ -96,6 +101,7 @@ class RoundResultSource(str, Enum):
     UNSHOWN_RESERVE = "unshown_reserve"
     PENDING_EVALUATIONS = "pending_evaluations"
     NEW_SEARCH = "new_search"
+    REFINED_SEARCH = "refined_search"
     CITATION_RESOLUTION = "citation_resolution"
     NO_ACTION = "no_action"
     FAILED = "failed"
@@ -147,7 +153,7 @@ def summarize_evaluations(
 
 
 class EvidenceSearchRoundResult(BaseModel):
-    """Typed result of reused work or at most one newly executed search round."""
+    """Typed result of reused work or a bounded sequence of search rounds."""
 
     session_status: SearchSessionStatus = Field(description="Session lifecycle after this operation.")
     round_number: int = Field(ge=0, description="Current one-based round, or zero before any search.")
@@ -181,6 +187,16 @@ class EvidenceSearchRoundResult(BaseModel):
         default=None,
         description="Safe operational failure code for a typed failed result.",
     )
+
+    @model_validator(mode="after")
+    def validate_source_lifecycle(self) -> "EvidenceSearchRoundResult":
+        """Prevent a terminal result from retaining a prospective source."""
+        if self.source is RoundResultSource.REFINEMENT_RECOMMENDED:
+            if self.session_status is not SearchSessionStatus.ACTIVE:
+                raise ValueError("a terminal result cannot recommend refinement")
+            if not self.refinement_recommended:
+                raise ValueError("refinement_recommended source requires an enabled recommendation")
+        return self
 
     @property
     def citation_resolution(self) -> CitationResolutionExecutionResult | None:
@@ -357,6 +373,7 @@ class EvidenceSearchWorkflow:
         session.current_round += 1
         session.touch()
         if previous_round is None:
+            executed_source = RoundResultSource.NEW_SEARCH
             outcome = await self._search_agent.run_search_decision(
                 sentence,
                 citation_hints,
@@ -364,6 +381,7 @@ class EvidenceSearchWorkflow:
                 citation_resolution_executor=self._citation_resolution_executor,
             )
         else:
+            executed_source = RoundResultSource.REFINED_SEARCH
             outcome = await self._search_agent.run_refined_search_decision(
                 sentence=sentence,
                 previous_round=previous_round,
@@ -402,6 +420,7 @@ class EvidenceSearchWorkflow:
             outcome=outcome,
             execution=outcome.tool_execution,
             filter_criteria=filter_criteria,
+            executed_source=executed_source,
         )
 
     async def _process_academic_search(
@@ -412,6 +431,7 @@ class EvidenceSearchWorkflow:
         outcome: SearchToolExecutionOutcome,
         execution: AcademicSearchExecutionResult,
         filter_criteria: ReferenceFilterCriteria,
+        executed_source: RoundResultSource,
     ) -> EvidenceSearchRoundResult:
         """Filter, stage and evaluate only new candidates from one academic search."""
         public = execution.public_result
@@ -458,7 +478,7 @@ class EvidenceSearchWorkflow:
         source = (
             RoundResultSource.REFINEMENT_RECOMMENDED
             if refinement
-            else RoundResultSource.NEW_SEARCH
+            else executed_source
         )
         round_summary = self._round_summary(
             session,
@@ -689,10 +709,20 @@ class EvidenceSearchWorkflow:
                 refinement_recommended=refinement_recommended,
                 failure_code=failure_code,
             )
+        source = last_result.source
+        if (
+            source is RoundResultSource.REFINEMENT_RECOMMENDED
+            and session.status is not SearchSessionStatus.ACTIVE
+        ):
+            source = (
+                RoundResultSource.REFINED_SEARCH
+                if last_result.round_number > 1
+                else RoundResultSource.NEW_SEARCH
+            )
         return EvidenceSearchRoundResult(
             session_status=session.status,
             round_number=session.current_round,
-            source=last_result.source,
+            source=source,
             search_outcome=last_result.search_outcome,
             filter_result=last_result.filter_result,
             round_summary=last_result.round_summary,
