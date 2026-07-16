@@ -29,6 +29,97 @@ from app.ui import api_client as api
 
 SENTENCE_PAGE_SIZE = 10
 PARAGRAPH_SUMMARY_PAGE_SIZE = 25
+EVIDENCE_LOADING_MESSAGES = (
+    "Preparando a busca acadêmica…",
+    "Consultando fontes acadêmicas…",
+    "Organizando os resultados encontrados…",
+    "Analisando a força das evidências…",
+    "Finalizando as sugestões…",
+)
+
+
+def _format_elapsed_time(elapsed_seconds: int) -> str:
+    """Format a non-negative elapsed duration as minutes and seconds."""
+    minutes, seconds = divmod(max(0, int(elapsed_seconds)), 60)
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+class _EvidenceLoadingIndicator:
+    """Update only local waiting text while one evidence request is active."""
+
+    def __init__(
+        self,
+        suggestions_state: dict,
+        refresh,
+        *,
+        tick_seconds: float = 1.0,
+        message_interval_seconds: float = 12.0,
+        clock=time.monotonic,
+        sleep=asyncio.sleep,
+    ) -> None:
+        self._state = suggestions_state
+        self._refresh = refresh
+        self._tick_seconds = tick_seconds
+        self._message_interval_seconds = message_interval_seconds
+        self._clock = clock
+        self._sleep = sleep
+        self._task: asyncio.Task | None = None
+        self._visible = True
+
+    @property
+    def running(self) -> bool:
+        """Return whether the presentation timer currently has an active task."""
+        return self._task is not None and not self._task.done()
+
+    @property
+    def visible(self) -> bool:
+        """Return whether the dialog may still receive presentation refreshes."""
+        return self._visible
+
+    def start(self) -> None:
+        """Start updates only for a visible dialog in the loading state."""
+        if not self._visible or self._state.get("status") != "loading" or self.running:
+            return
+        self._state["elapsed_seconds"] = 0
+        self._state["loading_message"] = EVIDENCE_LOADING_MESSAGES[0]
+        self._task = asyncio.create_task(self._run())
+
+    async def _run(self) -> None:
+        started_at = self._clock()
+        try:
+            while self._visible and self._state.get("status") == "loading":
+                await self._sleep(self._tick_seconds)
+                if not self._visible or self._state.get("status") != "loading":
+                    break
+                elapsed = max(0, int(self._clock() - started_at))
+                message_index = int(
+                    elapsed / self._message_interval_seconds
+                ) % len(EVIDENCE_LOADING_MESSAGES)
+                self._state["elapsed_seconds"] = elapsed
+                self._state["loading_message"] = EVIDENCE_LOADING_MESSAGES[message_index]
+                self._refresh()
+        except asyncio.CancelledError:
+            return
+
+    async def stop(self) -> None:
+        """Stop immediately and wait until no further timer refresh can occur."""
+        task = self._task
+        self._task = None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    def close(self) -> None:
+        """Permanently stop updates after the dialog has been closed."""
+        self._visible = False
+        task = self._task
+        self._task = None
+        if task is not None:
+            task.cancel()
 
 
 def _new_grounding_state(document_id: int | None = None) -> dict:
@@ -299,10 +390,14 @@ async def _synchronize_evidence_suggestions(
     suggestions_state: dict,
     request,
     refresh,
+    loading_indicator: _EvidenceLoadingIndicator | None = None,
 ) -> None:
     """Synchronize visible loading, success and failure with one request."""
     suggestions_state.update(status="loading", items=[], error=None)
-    refresh()
+    if loading_indicator is not None:
+        loading_indicator.start()
+    if loading_indicator is None or loading_indicator.visible:
+        refresh()
     try:
         suggestions_state["items"] = await request()
         suggestions_state["status"] = "success"
@@ -310,7 +405,10 @@ async def _synchronize_evidence_suggestions(
         suggestions_state["error"] = str(exc)[:80]
         suggestions_state["status"] = "error"
     finally:
-        refresh()
+        if loading_indicator is not None:
+            await loading_indicator.stop()
+        if loading_indicator is None or loading_indicator.visible:
+            refresh()
 
 
 def _evidence_search_finished_empty(suggestions_state: dict) -> bool:
@@ -1400,7 +1498,13 @@ async def _evidence_panel(
     """Opens evidence suggestions dialog for a sentence."""
     if searches_in_progress is None:
         searches_in_progress = set()
-    suggestions_state = {"status": "loading", "items": [], "error": None}
+    suggestions_state = {
+        "status": "loading",
+        "items": [],
+        "error": None,
+        "elapsed_seconds": 0,
+        "loading_message": EVIDENCE_LOADING_MESSAGES[0],
+    }
 
     with ui.dialog() as dlg, ui.card().style(
         "background:#1a1d27; border:1px solid rgba(255,255,255,.08); border-radius:16px; "
@@ -1414,11 +1518,22 @@ async def _evidence_panel(
         @ui.refreshable
         def evidence_content() -> None:
             if suggestions_state["status"] == "loading":
-                with ui.row().style("align-items:center; gap:10px;"):
+                with ui.row().style("align-items:flex-start; gap:12px;"):
                     ui.spinner(size="sm", color="indigo")
-                    ui.label("Buscando evidências...").style(
-                        "font-size:14px; color:#b8bdcc;"
-                    )
+                    with ui.column().style("gap:4px;"):
+                        ui.label("Buscando evidências...").style(
+                            "font-size:14px; font-weight:600; color:#d7daea;"
+                        )
+                        ui.label(suggestions_state["loading_message"]).style(
+                            "font-size:12px; color:#b8bdcc;"
+                        )
+                        ui.label(
+                            f"Tempo decorrido: "
+                            f"{_format_elapsed_time(suggestions_state['elapsed_seconds'])}"
+                        ).style("font-size:12px; color:#9ca2b5;")
+                        ui.label(
+                            "A busca com modelo local pode levar alguns minutos."
+                        ).style("font-size:12px; color:#73798c;")
                 return
 
             if suggestions_state["status"] == "error":
@@ -1448,6 +1563,7 @@ async def _evidence_panel(
                             suggestions_state,
                             request_more,
                             evidence_content.refresh,
+                            loading_indicator,
                         )
                         if suggestions_state["status"] == "success":
                             await refresh_fn()
@@ -1467,6 +1583,11 @@ async def _evidence_panel(
             if rejected:
                 ui.label(f"{len(rejected)} sugestão(ões) rejeitada(s).").style("font-size:12px; color:#8b90a0; margin-top:8px;")
 
+        loading_indicator = _EvidenceLoadingIndicator(
+            suggestions_state,
+            evidence_content.refresh,
+        )
+        dlg.on("hide", loading_indicator.close)
         evidence_content()
         ui.button("Fechar", on_click=dlg.close).classes("vs-btn-ghost").style("width:100%; margin-top:16px;")
     dlg.open()
@@ -1476,6 +1597,7 @@ async def _evidence_panel(
             state.get_cookies(), sentence["id"]
         ),
         evidence_content.refresh,
+        loading_indicator,
     )
 
 

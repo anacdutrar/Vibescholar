@@ -108,7 +108,7 @@ class ReferenceOut(BaseModel):
     doi: Optional[str] = None
     qualis_score: Optional[str] = None
     abstract: Optional[str] = None
-    availability: str
+    availability: Optional[str] = None
 
 class EvidenceSuggestionOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
