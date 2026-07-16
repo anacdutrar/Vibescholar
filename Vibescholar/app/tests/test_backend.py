@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError, PendingRollbackError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from app.core.database import Base, get_db
+from app.core.config import settings
 from app.app import fastapi_app
 from app.core.security import hash_password
 from app.models.user import Project, User
@@ -51,6 +52,12 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
     cursor.close()
 
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+@pytest.fixture(autouse=True)
+def use_explicit_legacy_mock_mode(monkeypatch):
+    """Backend regression tests deliberately exercise the temporary offline path."""
+    monkeypatch.setattr(settings, "USE_MOCK", True)
 
 @pytest.fixture(scope="function")
 def db_session():

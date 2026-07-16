@@ -1,11 +1,11 @@
-"""Initial academic-search planner backed exclusively by an OllamaClient."""
+"""Initial and refinement academic-search decisions over one injected LLM client."""
 
 import json
 from pathlib import Path
 
 from pydantic import ValidationError
 
-from app.agents.schemas import CitationHint, SearchPlan
+from app.agents.schemas import CitationHint, SearchPlan, SearchRoundSummary
 from app.core.logging import logger
 from app.llm.exceptions import (
     LLMResponseValidationError,
@@ -28,24 +28,37 @@ from app.agents.schemas import SearchToolName, SentenceType
 
 
 class SearchAgent:
-    """Classify one sentence and return one validated initial search plan."""
+    """Produce initial plans and single-inference native tool decisions."""
 
     MAX_SENTENCE_CHARACTERS = 12_000
 
-    def __init__(self, client: OllamaClient, prompt_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        client: OllamaClient,
+        prompt_path: Path | None = None,
+        refinement_prompt_path: Path | None = None,
+    ) -> None:
         self._client = client
         self._prompt_path = prompt_path or (
             Path(__file__).resolve().parents[2] / "prompts" / "search_agent_system.txt"
         )
-        self._system_prompt = self._load_prompt()
+        self._refinement_prompt_path = refinement_prompt_path or (
+            Path(__file__).resolve().parents[2] / "prompts" / "search_refinement_system.txt"
+        )
+        self._system_prompt = self._load_prompt(self._prompt_path, "SearchAgent")
+        self._refinement_system_prompt = self._load_prompt(
+            self._refinement_prompt_path,
+            "SearchAgent refinement",
+        )
 
-    def _load_prompt(self) -> str:
+    @staticmethod
+    def _load_prompt(prompt_path: Path, label: str) -> str:
         try:
-            prompt = self._prompt_path.read_text(encoding="utf-8").strip()
+            prompt = prompt_path.read_text(encoding="utf-8").strip()
         except (OSError, UnicodeError) as exc:
-            raise LLMUnavailableError("The SearchAgent system prompt is unavailable.") from exc
+            raise LLMUnavailableError(f"The {label} system prompt is unavailable.") from exc
         if not prompt:
-            raise LLMUnavailableError("The SearchAgent system prompt is empty.")
+            raise LLMUnavailableError(f"The {label} system prompt is empty.")
         return prompt
 
     @staticmethod
@@ -105,6 +118,24 @@ class SearchAgent:
                 f"sentence must contain at most {self.MAX_SENTENCE_CHARACTERS} characters"
             )
 
+    def _build_refinement_messages(
+        self,
+        sentence: str,
+        previous_round: SearchRoundSummary,
+    ) -> list[dict]:
+        """Send only the sentence and aggregate previous-round data as untrusted input."""
+        payload = json.dumps(
+            {
+                "sentence": sentence,
+                "previous_round": previous_round.model_dump(mode="json"),
+            },
+            ensure_ascii=False,
+        )
+        return [
+            {"role": "system", "content": self._refinement_system_prompt},
+            {"role": "user", "content": payload},
+        ]
+
     async def plan_initial_search(
         self,
         sentence: str,
@@ -135,6 +166,41 @@ class SearchAgent:
         self._validate_input(sentence)
         hints = citation_hints or []
         messages = self._build_messages(sentence, hints)
+        return await self._run_tool_decision(
+            messages,
+            academic_search_executor=academic_search_executor,
+            citation_resolution_executor=citation_resolution_executor,
+            allow_citation_resolution=True,
+        )
+
+    async def run_refined_search_decision(
+        self,
+        *,
+        sentence: str,
+        previous_round: SearchRoundSummary,
+        academic_search_executor: AcademicSearchExecutor | None = None,
+        citation_resolution_executor: CitationResolutionExecutor | None = None,
+    ) -> SearchToolExecutionOutcome:
+        """Perform one native tool-calling inference for an academic refinement round."""
+        self._validate_input(sentence)
+        summary = SearchRoundSummary.model_validate(previous_round)
+        messages = self._build_refinement_messages(sentence, summary)
+        return await self._run_tool_decision(
+            messages,
+            academic_search_executor=academic_search_executor,
+            citation_resolution_executor=citation_resolution_executor,
+            allow_citation_resolution=False,
+        )
+
+    async def _run_tool_decision(
+        self,
+        messages: list[dict],
+        *,
+        academic_search_executor: AcademicSearchExecutor | None,
+        citation_resolution_executor: CitationResolutionExecutor | None,
+        allow_citation_resolution: bool,
+    ) -> SearchToolExecutionOutcome:
+        """Run exactly one inference and execute at most one authorized tool."""
         response = await self._client.chat(
             messages,
             tools=self._tool_definitions(),
@@ -171,6 +237,10 @@ class SearchAgent:
                 tool_name = SearchToolName.SEARCH_ACADEMIC_WORKS
                 sentence_type = SentenceType.SCIENTIFIC_CLAIM
             elif sdk_call.tool_name == SearchToolName.RESOLVE_CITATION_METADATA.value:
+                if not allow_citation_resolution:
+                    raise ToolArgumentsValidationError(
+                        "Citation resolution is incompatible with academic search refinement."
+                    )
                 arguments = CitationResolutionInput.model_validate_json(sdk_call.arguments_json)
                 tool_name = SearchToolName.RESOLVE_CITATION_METADATA
                 sentence_type = SentenceType.CITATION_CLAIM

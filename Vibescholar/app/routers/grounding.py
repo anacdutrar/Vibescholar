@@ -27,7 +27,7 @@ def list_document_sentences(
     return grounding_service.list_document_sentences(document_id, current_user.id)
 
 @router.post("/api/sentences/search/evidence", response_model=List[EvidenceSuggestionOut])
-def search_sentence_evidence(
+async def search_sentence_evidence(
     req: EvidenceSearchRequest,
     current_user = Depends(get_current_user),
     grounding_service: GroundingService = Depends()
@@ -36,7 +36,7 @@ def search_sentence_evidence(
     Triggers MockEvidenceService to search and filter suggestions for a sentence,
     saving them as PENDING suggestions.
     """
-    return grounding_service.search_sentence_evidence(req.sentence_id, current_user.id)
+    return await grounding_service.search_sentence_evidence(req.sentence_id, current_user.id)
 
 @router.put("/api/evidence-suggestions/{suggestion_id}", response_model=EvidenceSuggestionOut)
 def update_suggestion_status(

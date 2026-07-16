@@ -46,7 +46,7 @@ class Settings:
         "DATABASE_URL",
         f"sqlite:///{os.path.join(_project_root, 'vibescholar.db')}"
     )
-    USE_MOCK: bool = os.getenv("USE_MOCK", "True").lower() == "true"
+    USE_MOCK: bool = os.getenv("USE_MOCK", "False").lower() == "true"
 
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
     OLLAMA_API_KEY: str = os.getenv("OLLAMA_API_KEY", "")

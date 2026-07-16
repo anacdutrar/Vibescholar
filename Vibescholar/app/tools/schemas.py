@@ -7,7 +7,13 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.agents.schemas import CitationHint, EvidenceVerdict, SearchToolName, SentenceType
+from app.agents.schemas import (
+    CitationHint,
+    EvidenceAnalysisScope,
+    EvidenceVerdict,
+    SearchToolName,
+    SentenceType,
+)
 from app.core.config import settings
 
 
@@ -606,4 +612,8 @@ class EvidenceSearchCandidate(BaseModel):
         description="Evaluator confidence signal when evaluation succeeded.",
     )
     reason: str | None = Field(default=None, description="Evaluator explanation or controlled failure reason.")
+    analysis_scope: EvidenceAnalysisScope | None = Field(
+        default=None,
+        description="Semantic fields used by the evaluator when evaluation succeeded.",
+    )
     shown_to_user: bool = Field(default=False, description="Whether this candidate was presented in the UI.")

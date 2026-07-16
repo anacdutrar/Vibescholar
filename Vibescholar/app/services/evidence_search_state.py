@@ -12,6 +12,7 @@ from enum import Enum
 from typing import AsyncIterator, TypeAlias
 
 from app.tools.schemas import EvidenceSearchCandidate
+from app.agents.schemas import SearchRoundSummary
 
 
 SearchSessionKey: TypeAlias = tuple[int, int, str]
@@ -47,6 +48,9 @@ class EvidenceSearchSession:
     queries_used: list[str] = field(default_factory=list)
     provider_statistics: dict[str, ProviderSearchStatistics] = field(default_factory=dict)
     candidates: dict[str, EvidenceSearchCandidate] = field(default_factory=dict)
+    recovered_candidate_keys: set[str] = field(default_factory=set)
+    filter_rejection_counts: dict[str, int] = field(default_factory=dict)
+    round_history: list[SearchRoundSummary] = field(default_factory=list)
     evaluated_candidate_keys: set[str] = field(default_factory=set)
     presented_candidate_keys: set[str] = field(default_factory=set)
     strong_support_keys: set[str] = field(default_factory=set)
@@ -64,7 +68,12 @@ class EvidenceSearchSession:
         for key, candidate in self.candidates.items():
             if key not in self.evaluated_candidate_keys:
                 return True
-            if key not in self.presented_candidate_keys and candidate.evaluation_status.value == "evaluated":
+            if (
+                key not in self.presented_candidate_keys
+                and not candidate.shown_to_user
+                and candidate.evaluation_status.value == "evaluated"
+                and key in self.strong_support_keys | self.partial_support_keys
+            ):
                 return True
         return False
 

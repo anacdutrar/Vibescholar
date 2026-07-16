@@ -14,6 +14,8 @@ from app.services.quality_analyzer import QualityAnalyzer
 from app.exceptions.document import DocumentNotFoundException
 from app.exceptions.reference import SuggestionNotFoundException
 from app.core.logging import logger
+from app.agents.schemas import CitationHint
+from app.schemas.response import EvidenceSuggestionOut
 
 
 def extract_citation_hints(text: str) -> Dict[str, Any] | None:
@@ -79,7 +81,11 @@ class GroundingService:
             for sentence in sentences
         ]
 
-    def search_sentence_evidence(self, sentence_id: int, user_id: int) -> List[EvidenceSuggestion]:
+    async def search_sentence_evidence(
+        self,
+        sentence_id: int,
+        user_id: int,
+    ) -> List[EvidenceSuggestionOut]:
         # Fetch sentence
         sentence = self.db.query(Sentence).filter(Sentence.id == sentence_id).first()
         if not sentence:
@@ -104,35 +110,29 @@ class GroundingService:
             sentence.id,
             [{"id": item.id, "reference_id": item.reference_id, "status": item.status} for item in existing],
         )
-        existing_by_reference = {item.reference_id: item for item in existing}
         terminal_reference_ids = {
             item.reference_id for item in existing if item.status in {"APPROVED", "REJECTED"}
         }
         citation_hints = extract_citation_hints(sentence.text)
-        citation_matches = []
-        if citation_hints:
-            citation_matches = ReferenceRepository.find_citation_matches(
-                self.db,
-                doc.project_id,
-                doi=citation_hints.get("doi"),
-                author=citation_hints.get("author"),
-                year=citation_hints.get("year"),
-            )
-        citation_reference_ids = {reference.id for reference in citation_matches}
         logger.info(
-            "evidence.search.citation sentence_id=%s pattern=%s reference_ids=%s",
+            "evidence.search.citation sentence_id=%s pattern=%s",
             sentence.id,
             citation_hints.get("raw") if citation_hints else None,
-            sorted(citation_reference_ids),
         )
 
         # Call EvidenceService search
         evidence_service = EvidenceService()
         try:
-            matching_refs = evidence_service.search(
+            return await evidence_service.search(
                 self.db,
                 sentence.text,
                 doc.project_id,
+                user_id=user_id,
+                document_version_id=version.id,
+                sentence_uuid=sentence.sentence_uuid,
+                citation_hints=(
+                    [CitationHint.model_validate(citation_hints)] if citation_hints else None
+                ),
                 excluded_reference_ids=terminal_reference_ids,
             )
         except IntegrityError:
@@ -146,65 +146,6 @@ class GroundingService:
                 status_code=409,
                 detail="Não foi possível preparar as referências de evidência.",
             )
-
-        provider_match_count = len(matching_refs)
-        matching_refs = list({
-            reference.id: reference
-            for reference in list(citation_matches) + matching_refs
-        }.values())
-        if provider_match_count:
-            matching_refs = matching_refs[:provider_match_count]
-
-        suggestions = [item for item in existing if item.status == "APPROVED"]
-        returned_ids = {item.id for item in suggestions}
-        discarded_ids = []
-        for ref in matching_refs:
-            if ref.id is None or ref.id <= 0 or ReferenceRepository.get_by_id(self.db, ref.id) is None:
-                discarded_ids.append(ref.id)
-                continue
-            # Check if suggestion already exists
-            sug = existing_by_reference.get(ref.id)
-            if not sug:
-                sug = EvidenceSuggestion(
-                    document_version_id=version.id,
-                    sentence_uuid=sentence.sentence_uuid,
-                    reference_id=ref.id,
-                    status="PENDING"
-                )
-                try:
-                    ReferenceRepository.create_suggestion(self.db, sug)
-                except IntegrityError:
-                    sug = ReferenceRepository.get_suggestion_by_version_and_sentence_and_ref(
-                        self.db, version.id, sentence.sentence_uuid, ref.id
-                    )
-                    if not sug:
-                        logger.warning(
-                            "evidence.search controlled_integrity_error sentence_id=%s reference_id=%s",
-                            sentence.id,
-                            ref.id,
-                        )
-                        raise HTTPException(
-                            status_code=409,
-                            detail="Não foi possível registrar a sugestão de evidência.",
-                        )
-                existing_by_reference[ref.id] = sug
-
-            sug.reference = ref
-            if (
-                sug.status != "REJECTED" or ref.id in citation_reference_ids
-            ) and sug.id not in returned_ids:
-                suggestions.append(sug)
-                returned_ids.add(sug.id)
-
-        logger.info(
-            "evidence.search.completed sentence_id=%s discarded_ids=%s final_count=%s reference_ids=%s",
-            sentence.id,
-            discarded_ids,
-            len(suggestions),
-            [suggestion.reference_id for suggestion in suggestions],
-        )
-
-        return suggestions
 
     def update_suggestion_status(self, suggestion_id: int, status: str, user_id: int) -> EvidenceSuggestion:
         sug = ReferenceRepository.get_suggestion_by_id(self.db, suggestion_id)

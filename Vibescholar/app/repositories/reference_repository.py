@@ -6,6 +6,7 @@ from datetime import datetime
 from app.models.reference import ProjectReference, EvidenceSuggestion
 from app.schemas.request import ReferenceCreate
 from app.core.logging import logger
+from app.tools.schemas import ReferenceCandidate
 
 class ReferenceRepository:
     # --- REFERENCE CRUD ---
@@ -74,6 +75,60 @@ class ReferenceRepository:
             func.lower(ProjectReference.title) == title.strip().lower(),
             ProjectReference.year == year,
         ).first()
+
+    @staticmethod
+    def find_project_candidate(
+        db: Session,
+        project_id: int,
+        doi: Optional[str],
+        title: str,
+        year: Optional[int],
+    ) -> Optional[ProjectReference]:
+        """Find one active project reference by DOI, then exact title and year."""
+        query = db.query(ProjectReference).filter(
+            ProjectReference.project_id == project_id,
+            ProjectReference.deleted_at.is_(None),
+        )
+        normalized_doi = doi.strip().lower() if doi else None
+        if normalized_doi:
+            found = query.filter(func.lower(ProjectReference.doi) == normalized_doi).first()
+            if found:
+                return found
+        return query.filter(
+            func.lower(ProjectReference.title) == title.strip().lower(),
+            ProjectReference.year == year,
+        ).first()
+
+    @staticmethod
+    def get_or_create_candidate(
+        db: Session,
+        project_id: int,
+        candidate: ReferenceCandidate,
+    ) -> tuple[ProjectReference, bool]:
+        """Stage one deduplicated real candidate without committing the transaction."""
+        reference = ReferenceRepository.find_project_candidate(
+            db,
+            project_id,
+            candidate.doi,
+            candidate.title,
+            candidate.year,
+        )
+        if reference is not None:
+            return reference, False
+        reference = ProjectReference(
+            project_id=project_id,
+            title=candidate.title,
+            authors="; ".join(candidate.authors),
+            journal=candidate.journal,
+            year=candidate.year,
+            doi=candidate.doi,
+            qualis_score=None,
+            abstract=candidate.abstract,
+            availability="ABERTO" if candidate.is_open_access is True else "FECHADO",
+        )
+        db.add(reference)
+        db.flush()
+        return reference, True
 
     @staticmethod
     def ensure_global_references(
@@ -174,6 +229,32 @@ class ReferenceRepository:
             EvidenceSuggestion.sentence_uuid == sentence_uuid,
             EvidenceSuggestion.reference_id == ref_id
         ).first()
+
+    @staticmethod
+    def get_or_stage_pending_suggestion(
+        db: Session,
+        version_id: int,
+        sentence_uuid: str,
+        reference_id: int,
+    ) -> tuple[EvidenceSuggestion, bool]:
+        """Reuse an existing suggestion or stage one pending suggestion without commit."""
+        existing = ReferenceRepository.get_suggestion_by_version_and_sentence_and_ref(
+            db,
+            version_id,
+            sentence_uuid,
+            reference_id,
+        )
+        if existing is not None:
+            return existing, False
+        suggestion = EvidenceSuggestion(
+            document_version_id=version_id,
+            sentence_uuid=sentence_uuid,
+            reference_id=reference_id,
+            status="PENDING",
+        )
+        db.add(suggestion)
+        db.flush()
+        return suggestion, True
 
     @staticmethod
     def create_suggestion(db: Session, suggestion: EvidenceSuggestion) -> EvidenceSuggestion:

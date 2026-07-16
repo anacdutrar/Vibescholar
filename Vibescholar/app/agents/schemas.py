@@ -2,7 +2,7 @@
 
 from enum import Enum
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class SentenceType(str, Enum):
@@ -148,6 +148,51 @@ class EvidenceAnalysisScope(str, Enum):
 
     TITLE_ONLY = "title_only"
     TITLE_AND_ABSTRACT = "title_and_abstract"
+
+
+class EvidenceCandidateInput(BaseModel):
+    """Minimal semantic candidate data that may be sent to an evidence evaluator."""
+
+    model_config = ConfigDict(frozen=True)
+
+    candidate_key: str = Field(
+        min_length=1,
+        description="Canonical candidate identity that the evaluator must preserve exactly.",
+    )
+    title: str = Field(
+        min_length=1,
+        description="Non-empty academic work title used for semantic evaluation.",
+    )
+    abstract: str | None = Field(
+        default=None,
+        description="Academic abstract when supplied; whitespace-only values become absent.",
+    )
+
+    @field_validator("candidate_key")
+    @classmethod
+    def validate_candidate_key(cls, value: str) -> str:
+        """Reject blank identities without altering the canonical key."""
+        if not value.strip():
+            raise ValueError("candidate_key must contain non-whitespace text")
+        return value
+
+    @field_validator("title")
+    @classmethod
+    def normalize_title(cls, value: str) -> str:
+        """Remove external whitespace and reject an unusable title."""
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("title must contain non-whitespace text")
+        return normalized
+
+    @field_validator("abstract")
+    @classmethod
+    def normalize_abstract(cls, value: str | None) -> str | None:
+        """Represent a missing or whitespace-only abstract consistently as None."""
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
 
 
 class EvidenceEvaluation(BaseModel):
