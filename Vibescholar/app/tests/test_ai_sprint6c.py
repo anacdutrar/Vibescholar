@@ -136,13 +136,13 @@ def academic_outcome(candidates: list[ReferenceCandidate], query: str) -> Search
         raw_results=len(candidates),
         after_deduplication=len(candidates),
         message="Academic search completed.",
-        requested_limit_per_provider=15,
-        effective_limit_per_provider=15,
+        requested_limit_per_provider=settings.RESULTS_PER_PROVIDER,
+        effective_limit_per_provider=settings.RESULTS_PER_PROVIDER,
     )
     call = SearchToolCallRecord(
         tool_call_id=f"call-{query}",
         tool_name=SearchToolName.SEARCH_ACADEMIC_WORKS,
-        validated_arguments=AcademicSearchInput(queries=[query], limit_per_provider=15),
+        validated_arguments=AcademicSearchInput(queries=[query]),
     )
     return SearchToolExecutionOutcome(
         sentence_type=SentenceType.SCIENTIFIC_CLAIM,

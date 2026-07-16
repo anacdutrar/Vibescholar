@@ -130,9 +130,9 @@ class ConcurrentLookupProvider(ProviderStub):
         return self.lookup_result
 
 
-def academic_request(queries=None, limit=5):
+def academic_request(queries=None):
     """Build one validated academic request."""
-    return AcademicSearchInput(queries=queries or ["scientific evidence"], limit_per_provider=limit)
+    return AcademicSearchInput(queries=queries or ["scientific evidence"])
 
 
 def citation_request(**hint):
@@ -162,7 +162,6 @@ def test_academic_executor_requires_exactly_one_query():
         executor = AcademicSearchExecutor(ProviderStub("openalex"), ProviderStub("semantic"))
         invalid_request = AcademicSearchInput.model_construct(
             queries=["first", "second"],
-            limit_per_provider=5,
         )
         with pytest.raises(ToolArgumentsValidationError):
             await executor.execute(invalid_request)
@@ -170,19 +169,20 @@ def test_academic_executor_requires_exactly_one_query():
     run(scenario())
 
 
-def test_academic_executor_clamps_provider_limit_to_fifteen():
+def test_academic_executor_uses_configured_provider_limit():
     async def scenario():
+        assert settings.RESULTS_PER_PROVIDER == 10
         openalex = ProviderStub("openalex")
         semantic = ProviderStub("semantic")
         executor = AcademicSearchExecutor(openalex, semantic)
-        await executor.execute(academic_request(limit=settings.RESULTS_PER_PROVIDER + 20))
+        await executor.execute(academic_request())
         assert openalex.search_calls == [("scientific evidence", settings.RESULTS_PER_PROVIDER)]
         assert semantic.search_calls == [("scientific evidence", settings.RESULTS_PER_PROVIDER)]
 
     run(scenario())
 
 
-def test_academic_executor_never_accepts_more_than_thirty_raw_results():
+def test_academic_executor_never_exceeds_twice_the_configured_raw_limit():
     async def scenario():
         openalex_results = [
             candidate("openalex", f"W{index}", title=f"OpenAlex {index}")
@@ -195,9 +195,9 @@ def test_academic_executor_never_accepts_more_than_thirty_raw_results():
         result = await AcademicSearchExecutor(
             ProviderStub("openalex", search_result=openalex_results),
             ProviderStub("semantic", search_result=semantic_results),
-        ).execute(academic_request(limit=100))
-        assert result.public_result.raw_results == 30
-        assert len(result.candidates) == 30
+        ).execute(academic_request())
+        assert result.public_result.raw_results == settings.RESULTS_PER_PROVIDER * 2
+        assert len(result.candidates) == settings.RESULTS_PER_PROVIDER * 2
 
     run(scenario())
 
@@ -474,7 +474,7 @@ def test_search_agent_preserves_one_inference_and_internal_outcome():
                     tool_call_id="call-4b",
                     tool_name="search_academic_works",
                     arguments_json=json.dumps(
-                        {"queries": ["scientific evidence"], "limit_per_provider": 5}
+                        {"queries": ["scientific evidence"]}
                     ),
                 ),
             ),

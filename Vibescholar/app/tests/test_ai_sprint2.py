@@ -428,4 +428,4 @@ def test_default_prompt_is_the_project_utf8_prompt():
     expected = Path(__file__).resolve().parents[2] / "prompts" / "search_agent_system.txt"
     agent = SearchAgent(FakeOllamaClient(SearchPlan(**valid_plan_payload())))
     assert agent._prompt_path == expected
-    assert "SearchAgent de planejamento acadêmico" in agent._system_prompt
+    assert "VibeScholar SearchAgent" in agent._system_prompt

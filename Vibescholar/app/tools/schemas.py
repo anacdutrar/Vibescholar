@@ -20,14 +20,12 @@ from app.core.config import settings
 class AcademicSearchInput(BaseModel):
     """Validated arguments for a cross-provider academic-work search."""
 
+    model_config = ConfigDict(extra="forbid")
+
     queries: list[str] = Field(
         min_length=1,
         max_length=1,
         description="Exactly one principal academic search query selected for this round.",
-    )
-    limit_per_provider: int = Field(
-        gt=0,
-        description="Requested result limit for each enabled academic provider.",
     )
 
     @field_validator("queries")
@@ -133,7 +131,10 @@ class AcademicSearchToolResult(BaseModel):
     raw_results: int = Field(ge=0, description="Total raw provider results before deduplication.")
     after_deduplication: int = Field(ge=0, description="Candidate count after canonical deduplication.")
     message: str = Field(min_length=1, max_length=500, description="Safe user-neutral operational message.")
-    requested_limit_per_provider: int = Field(gt=0, description="Limit requested in the tool call.")
+    requested_limit_per_provider: int = Field(
+        gt=0,
+        description="Provider result limit configured deterministically by the backend.",
+    )
     effective_limit_per_provider: int = Field(gt=0, description="Limit enforced by backend configuration.")
 
     @field_validator("message", mode="before")
@@ -149,8 +150,8 @@ class AcademicSearchToolResult(BaseModel):
             raise ValueError("after_deduplication cannot exceed raw_results")
         if self.raw_results != sum(provider.results_found for provider in self.providers):
             raise ValueError("raw_results must equal the provider result total")
-        if self.effective_limit_per_provider > self.requested_limit_per_provider:
-            raise ValueError("effective limit cannot exceed the requested limit")
+        if self.effective_limit_per_provider != self.requested_limit_per_provider:
+            raise ValueError("configured and effective provider limits must match")
         if self.effective_limit_per_provider > settings.RESULTS_PER_PROVIDER:
             raise ValueError("effective limit exceeds the configured provider limit")
 

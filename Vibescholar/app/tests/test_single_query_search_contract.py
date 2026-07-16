@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from app.agents.schemas import SearchPlan, SearchRoundSummary, SearchToolName
 from app.agents.search_agent import SearchAgent
+from app.core.config import settings
 from app.llm.exceptions import ToolArgumentsValidationError
 from app.llm.ollama_client import LLMChatResponse, LLMToolCall
 from app.tools.schemas import (
@@ -55,9 +56,7 @@ def academic_tool_response(query: str, *, call_id: str) -> LLMChatResponse:
             LLMToolCall(
                 tool_call_id=call_id,
                 tool_name=SearchToolName.SEARCH_ACADEMIC_WORKS.value,
-                arguments_json=json.dumps(
-                    {"queries": [query], "limit_per_provider": 5}
-                ),
+                arguments_json=json.dumps({"queries": [query]}),
             ),
         ),
     )
@@ -79,8 +78,8 @@ def empty_execution(request: AcademicSearchInput) -> AcademicSearchExecutionResu
             raw_results=0,
             after_deduplication=0,
             message="No candidates found.",
-            requested_limit_per_provider=request.limit_per_provider,
-            effective_limit_per_provider=request.limit_per_provider,
+            requested_limit_per_provider=settings.RESULTS_PER_PROVIDER,
+            effective_limit_per_provider=settings.RESULTS_PER_PROVIDER,
         ),
     )
 
@@ -91,17 +90,18 @@ def test_tool_json_schema_requires_exactly_one_query():
 
     assert queries_schema["minItems"] == 1
     assert queries_schema["maxItems"] == 1
+    assert "limit_per_provider" not in schema["properties"]
 
     tool = SearchAgent._tool_definitions()[0]
     exposed_queries = tool["function"]["parameters"]["properties"]["queries"]
     assert exposed_queries["minItems"] == 1
     assert exposed_queries["maxItems"] == 1
+    assert "limit_per_provider" not in tool["function"]["parameters"]["properties"]
 
 
 def test_academic_search_input_accepts_one_normalized_query():
     request = AcademicSearchInput(
         queries=["  scientific evidence  "],
-        limit_per_provider=5,
     )
 
     assert request.queries == ["scientific evidence"]
@@ -110,7 +110,15 @@ def test_academic_search_input_accepts_one_normalized_query():
 @pytest.mark.parametrize("queries", [[], ["first", "second"], ["a", "b", "c"]])
 def test_academic_search_input_rejects_query_counts_other_than_one(queries):
     with pytest.raises(ValidationError):
-        AcademicSearchInput(queries=queries, limit_per_provider=5)
+        AcademicSearchInput(queries=queries)
+
+
+def test_agent_supplied_provider_limit_is_rejected_as_an_extra_argument():
+    with pytest.raises(ValidationError):
+        AcademicSearchInput(
+            queries=["scientific evidence"],
+            limit_per_provider=1,
+        )
 
 
 def test_search_plan_uses_the_same_single_query_contract():
@@ -185,9 +193,7 @@ def test_multiple_queries_are_rejected_before_provider_execution():
         invalid_call = LLMToolCall(
             tool_call_id=response.tool_calls[0].tool_call_id,
             tool_name=response.tool_calls[0].tool_name,
-            arguments_json=json.dumps(
-                {"queries": ["first", "second"], "limit_per_provider": 5}
-            ),
+            arguments_json=json.dumps({"queries": ["first", "second"]}),
         )
         client = RecordingClient(
             [
@@ -219,6 +225,6 @@ def test_prompts_state_the_single_query_rule():
 
     for filename in ("search_agent_system.txt", "search_refinement_system.txt"):
         content = (prompts_root / filename).read_text(encoding="utf-8").casefold()
-        assert "exatamente uma query" in content
-        assert "múltiplas queries" in content or "multiplas queries" in content
-        assert "rodadas futuras" in content
+        assert "exactly one academic" in content
+        assert "multiple queries" in content
+        assert "future refinement rounds" in content

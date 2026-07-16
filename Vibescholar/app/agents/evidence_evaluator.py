@@ -8,11 +8,9 @@ this evaluator. Evaluation never approves or persists evidence.
 import json
 import time
 from collections import Counter
-from collections.abc import Sequence
 from pathlib import Path
-from typing import Protocol, TypeVar
 
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from app.agents.schemas import (
     EvidenceAnalysisScope,
@@ -22,21 +20,7 @@ from app.agents.schemas import (
 )
 from app.core.logging import logger
 from app.llm.exceptions import LLMError, LLMResponseValidationError, LLMUnavailableError
-
-
-ResponseModelT = TypeVar("ResponseModelT", bound=BaseModel)
-
-
-class StructuredChatClient(Protocol):
-    """Minimal structured-output operation required from an LLM backend."""
-
-    async def structured_chat(
-        self,
-        messages: Sequence[dict[str, object]],
-        response_model: type[ResponseModelT],
-    ) -> ResponseModelT:
-        """Return one response validated as the requested Pydantic model."""
-        ...
+from app.llm.protocols import StructuredChatClient
 
 
 class EvidenceEvaluator:

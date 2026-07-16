@@ -61,6 +61,7 @@ def test_chat_logs_effective_parameters_tools_usage_and_safe_sizes(
     async def scenario():
         prompt_marker = "private-search-agent-prompt"
         secret = "private-ollama-key"
+        monkeypatch.setattr(settings, "LLM_DIAGNOSTIC_LOGGING", True)
         monkeypatch.setattr(settings, "OLLAMA_API_KEY", secret)
         monkeypatch.setattr(settings, "OLLAMA_MODEL", "qwen3.5:9b")
         monkeypatch.setattr(settings, "LLM_TEMPERATURE", 0.1)
@@ -79,7 +80,7 @@ def test_chat_logs_effective_parameters_tools_usage_and_safe_sizes(
                 id="call-1",
                 function=SimpleNamespace(
                     name="search_academic_works",
-                    arguments='{"queries":["query"],"limit_per_provider":5}',
+                    arguments='{"queries":["query"]}',
                 ),
             )
         ]
@@ -142,6 +143,7 @@ def test_structured_chat_without_seed_or_usage_logs_approximate_metrics(
     async def scenario():
         system_content = "system-private-marker"
         user_content = "user-private-marker"
+        monkeypatch.setattr(settings, "LLM_DIAGNOSTIC_LOGGING", True)
         monkeypatch.setattr(settings, "LLM_SEED", None)
         completions = InstrumentedCompletions(
             content='{"value":"ok"}',

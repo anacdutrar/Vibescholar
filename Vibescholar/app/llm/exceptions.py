@@ -23,6 +23,14 @@ class LLMUnavailableError(LLMError):
     """Raised when the service is reachable but the model or service is unavailable."""
 
 
+class LLMConfigurationError(LLMError):
+    """Raised when an explicitly selected LLM backend is not safely configured."""
+
+
+class LLMRateLimitError(LLMError):
+    """Raised when an LLM backend rejects a request due to rate limiting."""
+
+
 class UnknownToolError(LLMError):
     """Raised when a model requests a function outside the exact whitelist."""
 

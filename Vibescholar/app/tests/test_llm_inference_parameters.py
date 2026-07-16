@@ -10,6 +10,7 @@ from openai import APITimeoutError
 from pydantic import BaseModel
 
 from app.core.config import Settings, settings
+from app.core.logging import configure_llm_diagnostic_logging
 from app.llm.exceptions import LLMTimeoutError
 from app.llm.ollama_client import LLMComponent, OllamaClient
 
@@ -63,6 +64,7 @@ def test_inference_settings_read_defaults_and_environment(monkeypatch):
         "LLM_FREQUENCY_PENALTY",
         "LLM_PRESENCE_PENALTY",
         "LLM_SEED",
+        "LLM_DIAGNOSTIC_LOGGING",
     )
     for name in names:
         monkeypatch.delenv(name, raising=False)
@@ -73,12 +75,14 @@ def test_inference_settings_read_defaults_and_environment(monkeypatch):
     assert defaults.LLM_FREQUENCY_PENALTY == 0.0
     assert defaults.LLM_PRESENCE_PENALTY == 0.0
     assert defaults.LLM_SEED is None
+    assert defaults.LLM_DIAGNOSTIC_LOGGING is False
 
     monkeypatch.setenv("LLM_TEMPERATURE", "0.25")
     monkeypatch.setenv("LLM_TOP_P", "0.8")
     monkeypatch.setenv("LLM_FREQUENCY_PENALTY", "0.15")
     monkeypatch.setenv("LLM_PRESENCE_PENALTY", "-0.2")
     monkeypatch.setenv("LLM_SEED", "42")
+    monkeypatch.setenv("LLM_DIAGNOSTIC_LOGGING", "true")
 
     configured = Settings()
     assert configured.LLM_TEMPERATURE == 0.25
@@ -86,6 +90,7 @@ def test_inference_settings_read_defaults_and_environment(monkeypatch):
     assert configured.LLM_FREQUENCY_PENALTY == 0.15
     assert configured.LLM_PRESENCE_PENALTY == -0.2
     assert configured.LLM_SEED == 42
+    assert configured.LLM_DIAGNOSTIC_LOGGING is True
 
 
 def test_chat_sends_all_configured_inference_parameters(monkeypatch):
@@ -191,6 +196,7 @@ def test_initialization_log_contains_only_operational_parameters(
     monkeypatch.setattr(settings, "OLLAMA_API_KEY", secret)
     monkeypatch.setattr(settings, "OLLAMA_MODEL", "diagnostic-model")
     monkeypatch.setattr(settings, "LLM_SEED", None)
+    monkeypatch.setattr(settings, "LLM_DIAGNOSTIC_LOGGING", True)
 
     with caplog.at_level(logging.DEBUG, logger="vibescholar"):
         OllamaClient(FakeSDKClient(FakeCompletions()))
@@ -209,6 +215,7 @@ def test_chat_logs_effective_parameters_without_messages_or_credentials(
     async def scenario():
         prompt_marker = "private-prompt-marker"
         secret = "private-api-key-marker"
+        monkeypatch.setattr(settings, "LLM_DIAGNOSTIC_LOGGING", True)
         monkeypatch.setattr(settings, "OLLAMA_API_KEY", secret)
         monkeypatch.setattr(settings, "LLM_TEMPERATURE", 0.2)
         monkeypatch.setattr(settings, "LLM_TOP_P", 0.8)
@@ -242,6 +249,7 @@ def test_structured_chat_logs_parameters_without_payload_content(
 ):
     async def scenario():
         payload_marker = "private-structured-payload"
+        monkeypatch.setattr(settings, "LLM_DIAGNOSTIC_LOGGING", True)
         monkeypatch.setattr(settings, "LLM_SEED", None)
         client = OllamaClient(
             FakeSDKClient(FakeCompletions('{"value":"private-result"}')),
@@ -275,6 +283,7 @@ def test_failed_request_log_is_operational_and_excludes_sensitive_content(
             "10.1234/SECRET-DOI",
         )
         api_key = "API-KEY-SECRET"
+        monkeypatch.setattr(settings, "LLM_DIAGNOSTIC_LOGGING", True)
         monkeypatch.setattr(settings, "OLLAMA_API_KEY", api_key)
         timeout = APITimeoutError(request=httpx.Request("POST", "http://test"))
         client = OllamaClient(
@@ -301,3 +310,49 @@ def test_failed_request_log_is_operational_and_excludes_sensitive_content(
             assert marker not in logs
 
     run(scenario())
+
+
+def test_diagnostic_logging_false_hides_llm_debug_events(monkeypatch, caplog):
+    async def scenario():
+        monkeypatch.setattr(settings, "LLM_DIAGNOSTIC_LOGGING", False)
+        client = OllamaClient(FakeSDKClient(FakeCompletions()))
+
+        with caplog.at_level(logging.DEBUG):
+            await client.chat([{"role": "user", "content": "private-marker"}])
+
+        assert "ai.pipeline.llm.request" not in caplog.text
+        assert "ai.pipeline.llm.response" not in caplog.text
+        assert "llm.ollama.inference" not in caplog.text
+
+    run(scenario())
+
+
+def test_diagnostic_logging_true_exposes_only_llm_events_and_keeps_global_info(
+    monkeypatch, caplog
+):
+    async def scenario():
+        secret = "diagnostic-secret-key"
+        message = "diagnostic-private-message"
+        monkeypatch.setattr(settings, "LLM_DIAGNOSTIC_LOGGING", True)
+        monkeypatch.setattr(settings, "OLLAMA_API_KEY", secret)
+        global_logger = logging.getLogger("vibescholar")
+        client = OllamaClient(
+            FakeSDKClient(FakeCompletions()),
+            component=LLMComponent.SEARCH_AGENT,
+        )
+
+        with caplog.at_level(logging.DEBUG):
+            await client.chat([{"role": "user", "content": message}])
+
+        assert global_logger.getEffectiveLevel() == logging.INFO
+        assert logging.getLogger("httpx").getEffectiveLevel() != logging.DEBUG
+        assert "ai.pipeline.llm.request" in caplog.text
+        assert "ai.pipeline.llm.response" in caplog.text
+        assert "component=SearchAgent" in caplog.text
+        assert secret not in caplog.text
+        assert message not in caplog.text
+
+    try:
+        run(scenario())
+    finally:
+        configure_llm_diagnostic_logging(False)

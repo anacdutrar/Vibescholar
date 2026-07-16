@@ -125,8 +125,8 @@ def academic_execution() -> AcademicSearchExecutionResult:
             raw_results=1,
             after_deduplication=1,
             message="Academic search completed.",
-            requested_limit_per_provider=1,
-            effective_limit_per_provider=1,
+            requested_limit_per_provider=settings.RESULTS_PER_PROVIDER,
+            effective_limit_per_provider=settings.RESULTS_PER_PROVIDER,
         ),
     )
 
@@ -172,7 +172,7 @@ def test_qwen_selects_academic_search_and_backend_executes_once():
                 function_call(
                     "call-academic",
                     "search_academic_works",
-                    {"queries": [" scientific writing "], "limit_per_provider": 4},
+                    {"queries": [" scientific writing "]},
                 )
             ],
         )
@@ -280,7 +280,7 @@ def test_more_than_one_tool_call_is_rejected_before_execution():
     async def scenario():
         response = sdk_completion(
             tool_calls=[
-                function_call("first", "search_academic_works", {"queries": ["one"], "limit_per_provider": 1}),
+                function_call("first", "search_academic_works", {"queries": ["one"]}),
                 function_call("second", "resolve_citation_metadata", {"citation_hints": [{"raw": "[1]"}]}),
             ]
         )
@@ -318,9 +318,9 @@ def test_unknown_tool_and_prompt_injection_cannot_execute_arbitrary_function():
     ("tool_name", "arguments"),
     [
         ("search_academic_works", "not-json"),
-        ("search_academic_works", {"queries": [], "limit_per_provider": 1}),
-        ("search_academic_works", {"queries": ["same", " SAME "], "limit_per_provider": 1}),
-        ("search_academic_works", {"queries": ["valid"], "limit_per_provider": 0}),
+        ("search_academic_works", {"queries": []}),
+        ("search_academic_works", {"queries": ["same", " SAME "]}),
+        ("search_academic_works", {"queries": ["valid"], "limit_per_provider": 1}),
         ("resolve_citation_metadata", {"citation_hints": []}),
         ("resolve_citation_metadata", {"citation_hints": [{"raw": "   "}]}),
     ],
@@ -338,15 +338,14 @@ def test_invalid_tool_arguments_are_rejected(tool_name, arguments):
     run(scenario())
 
 
-def test_requested_limit_is_clamped_and_recorded_in_typed_outcome():
+def test_provider_limit_is_backend_configured_and_recorded_in_typed_outcome():
     async def scenario():
-        requested = settings.RESULTS_PER_PROVIDER + 100
         response = sdk_completion(
             tool_calls=[
                 function_call(
                     "limit-call",
                     "search_academic_works",
-                    {"queries": ["academic evidence"], "limit_per_provider": requested},
+                    {"queries": ["academic evidence"]},
                 )
             ]
         )
@@ -354,10 +353,11 @@ def test_requested_limit_is_clamped_and_recorded_in_typed_outcome():
         executor = ExecutorStub(academic_execution())
         outcome = await agent.run_search_decision("A claim.", academic_search_executor=executor)
         executed_request = executor.await_args.args[0]
-        assert outcome.requested_limit_per_provider == requested
+        assert outcome.requested_limit_per_provider == settings.RESULTS_PER_PROVIDER
         assert outcome.effective_limit_per_provider == settings.RESULTS_PER_PROVIDER
-        assert executed_request.limit_per_provider == settings.RESULTS_PER_PROVIDER
-        assert outcome.tool_call.validated_arguments.limit_per_provider == requested
+        assert executed_request.queries == ["academic evidence"]
+        assert not hasattr(executed_request, "limit_per_provider")
+        assert not hasattr(outcome.tool_call.validated_arguments, "limit_per_provider")
 
     run(scenario())
 
@@ -375,7 +375,7 @@ def test_tool_result_is_not_returned_to_model_and_no_tool_role_is_sent():
     async def scenario():
         response = sdk_completion(
             tool_calls=[
-                function_call("single", "search_academic_works", {"queries": ["query"], "limit_per_provider": 1})
+                function_call("single", "search_academic_works", {"queries": ["query"]})
             ]
         )
         agent, sdk = agent_for(response)
@@ -393,7 +393,7 @@ def test_tool_result_is_not_returned_to_model_and_no_tool_role_is_sent():
 def test_missing_executor_raises_controlled_unavailable_error(tool_name):
     async def scenario():
         arguments = (
-            {"queries": ["query"], "limit_per_provider": 1}
+            {"queries": ["query"]}
             if tool_name == "search_academic_works"
             else {"citation_hints": [{"raw": "[1]"}]}
         )
@@ -409,7 +409,7 @@ def test_executor_failure_returns_backend_failed_outcome_without_sensitive_log(c
         secret = "private-provider-key"
         response = sdk_completion(
             tool_calls=[
-                function_call("failed", "search_academic_works", {"queries": ["query"], "limit_per_provider": 1})
+                function_call("failed", "search_academic_works", {"queries": ["query"]})
             ]
         )
         agent, _ = agent_for(response)
@@ -429,7 +429,7 @@ def test_tool_boundaries_validate_and_delegate_without_executor_hierarchy():
         academic_executor = ExecutorStub(academic_execution())
         citation_executor = ExecutorStub(citation_execution())
         academic_result = await search_academic_works(
-            AcademicSearchInput(queries=["query"], limit_per_provider=1), academic_executor
+            AcademicSearchInput(queries=["query"]), academic_executor
         )
         citation_result = await resolve_citation_metadata(
             CitationResolutionInput(citation_hints=[{"raw": "[1]"}]), citation_executor

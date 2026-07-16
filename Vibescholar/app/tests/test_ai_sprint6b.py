@@ -106,11 +106,11 @@ def academic_outcome(
         raw_results=len(candidates),
         after_deduplication=len(candidates),
         message="Academic round completed.",
-        requested_limit_per_provider=15,
-        effective_limit_per_provider=15,
+        requested_limit_per_provider=settings.RESULTS_PER_PROVIDER,
+        effective_limit_per_provider=settings.RESULTS_PER_PROVIDER,
     )
     execution = AcademicSearchExecutionResult(candidates=candidates, public_result=public)
-    arguments = AcademicSearchInput(queries=[query], limit_per_provider=15)
+    arguments = AcademicSearchInput(queries=[query])
     call = SearchToolCallRecord(
         tool_call_id=f"call-{query}",
         tool_name=SearchToolName.SEARCH_ACADEMIC_WORKS,
@@ -438,7 +438,7 @@ def test_search_agent_refinement_uses_one_native_tool_call_and_aggregate_data_on
                         tool_call_id="refined-call",
                         tool_name="search_academic_works",
                         arguments_json=json.dumps(
-                            {"queries": ["new query"], "limit_per_provider": 15}
+                            {"queries": ["new query"]}
                         ),
                     ),
                 ),

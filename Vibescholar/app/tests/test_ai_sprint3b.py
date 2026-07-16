@@ -70,8 +70,8 @@ def academic_public(
     providers: list[ProviderExecutionSummary] | None = None,
     raw: int = 1,
     deduplicated: int = 1,
-    requested: int = 5,
-    effective: int = 5,
+    requested: int = settings.RESULTS_PER_PROVIDER,
+    effective: int = settings.RESULTS_PER_PROVIDER,
 ) -> AcademicSearchToolResult:
     """Build a configurable public academic result."""
     return AcademicSearchToolResult(
@@ -281,18 +281,18 @@ def test_citation_public_conversion_never_contains_match_metadata():
     assert "source_url" not in serialized
 
 
-def test_academic_executor_is_injected_and_receives_effective_limit():
+def test_academic_executor_is_injected_and_uses_backend_configured_limit():
     async def scenario():
-        requested = settings.RESULTS_PER_PROVIDER + 50
         executor = AcademicExecutorStub(academic_execution())
         result = await search_academic_works(
-            AcademicSearchInput(queries=["academic evidence"], limit_per_provider=requested),
+            AcademicSearchInput(queries=["academic evidence"]),
             executor,
         )
         request = executor.execute.await_args.args[0]
         assert isinstance(result, AcademicSearchExecutionResult)
-        assert request.limit_per_provider == settings.RESULTS_PER_PROVIDER
-        assert result.public_result.requested_limit_per_provider == requested
+        assert request.queries == ["academic evidence"]
+        assert not hasattr(request, "limit_per_provider")
+        assert result.public_result.requested_limit_per_provider == settings.RESULTS_PER_PROVIDER
         assert result.public_result.effective_limit_per_provider == settings.RESULTS_PER_PROVIDER
         executor.execute.assert_awaited_once()
 
@@ -317,7 +317,7 @@ def test_missing_executors_remain_controlled_errors():
     async def scenario():
         with pytest.raises(ToolUnavailableError):
             await search_academic_works(
-                AcademicSearchInput(queries=["query"], limit_per_provider=1), None
+                AcademicSearchInput(queries=["query"]), None
             )
         with pytest.raises(ToolUnavailableError):
             await resolve_citation_metadata(
@@ -333,7 +333,7 @@ def test_executor_failure_becomes_safe_typed_internal_result(caplog):
         executor = AcademicExecutorStub(error=ValueError(secret))
         with caplog.at_level(logging.ERROR):
             result = await search_academic_works(
-                AcademicSearchInput(queries=["query"], limit_per_provider=1), executor
+                AcademicSearchInput(queries=["query"]), executor
             )
         assert result.public_result.status is AcademicSearchStatus.FAILED
         assert result.candidates == []
@@ -348,7 +348,7 @@ def test_search_agent_builds_academic_outcome_from_internal_result():
         client = DecisionClient(
             tool_response(
                 "search_academic_works",
-                {"queries": ["academic evidence"], "limit_per_provider": 3},
+                {"queries": ["academic evidence"]},
                 "academic-call",
             )
         )
@@ -425,7 +425,7 @@ def test_outcome_rejects_wrong_or_missing_execution_type():
             tool_call={
                 "tool_call_id": "call",
                 "tool_name": "search_academic_works",
-                "validated_arguments": {"queries": ["query"], "limit_per_provider": 1},
+                "validated_arguments": {"queries": ["query"]},
             },
             reason="Invalid mismatch.",
         )

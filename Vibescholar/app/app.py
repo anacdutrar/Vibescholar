@@ -30,6 +30,15 @@ fastapi_app.include_router(grounding.router)
 
 @fastapi_app.on_event("startup")
 def on_startup():
+    logger.info(
+        "ai.openrouter.configuration backend=%s model=%s api_key_present=%s "
+        "allowed_models=%s paid_models_enabled=%s",
+        settings.EVIDENCE_EVALUATOR_BACKEND,
+        settings.OPENROUTER_MODEL or "unset",
+        bool(settings.OPENROUTER_API_KEY.strip()),
+        settings.OPENROUTER_ALLOWED_MODELS,
+        settings.OPENROUTER_ALLOW_PAID_MODELS,
+    )
     logger.info("Starting up VibeScholar…")
     try:
         init_db()

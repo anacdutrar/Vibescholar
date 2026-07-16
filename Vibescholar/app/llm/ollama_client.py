@@ -21,7 +21,7 @@ from openai.types.chat import (
 from pydantic import BaseModel, ValidationError
 
 from app.core.config import settings
-from app.core.logging import logger
+from app.core.logging import configure_llm_diagnostic_logging, llm_logger
 from app.llm.exceptions import (
     LLMConnectionError,
     LLMError,
@@ -76,6 +76,7 @@ class OllamaClient:
         self._timeout = settings.LLM_TIMEOUT_SECONDS
         self._base_url = self._openai_base_url(settings.OLLAMA_BASE_URL)
         self._component = LLMComponent(component)
+        configure_llm_diagnostic_logging(settings.LLM_DIAGNOSTIC_LOGGING)
         self._client = client or AsyncOpenAI(
             base_url=self._base_url,
             api_key=settings.OLLAMA_API_KEY or "ollama",
@@ -157,7 +158,7 @@ class OllamaClient:
     ) -> None:
         """Log only non-sensitive effective inference controls at DEBUG level."""
         arguments = request_arguments or {}
-        logger.debug(
+        llm_logger.debug(
             "llm.ollama.%s model=%s timeout_seconds=%s temperature=%s top_p=%s "
             "frequency_penalty=%s presence_penalty=%s seed=%s context_configured=%s",
             event,
@@ -241,7 +242,7 @@ class OllamaClient:
         safe_tool_choice = tool_choice if isinstance(tool_choice, str) else (
             "configured" if tool_choice is not None else "none"
         )
-        logger.debug(
+        llm_logger.debug(
             "ai.pipeline.llm.request component=%s backend=%s operation=%s "
             "model=%s timeout=%s "
             "temperature=%s top_p=%s frequency_penalty=%s presence_penalty=%s "
@@ -289,7 +290,7 @@ class OllamaClient:
             isinstance(value, int)
             for value in (prompt_tokens, completion_tokens, total_tokens)
         )
-        logger.debug(
+        llm_logger.debug(
             "ai.pipeline.llm.response component=%s backend=%s operation=%s duration=%.4f "
             "finish_reason=%s tool_calls_present=%s tool_calls=%s "
             "structured_output=%s usage_available=%s prompt_tokens=%s "
@@ -325,7 +326,7 @@ class OllamaClient:
         exc: Exception,
     ) -> None:
         """Log a failed request using only safe operational metadata."""
-        logger.debug(
+        llm_logger.debug(
             "ai.pipeline.llm.response component=%s backend=%s operation=%s "
             "status=failed duration=%.4f error_type=%s structured_output=%s "
             "model=%s timeout=%s temperature=%s top_p=%s "

@@ -15,3 +15,11 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger("vibescholar")
+logger.setLevel(logging.INFO)
+llm_logger = logging.getLogger("vibescholar.ai.llm")
+llm_logger.setLevel(logging.INFO)
+
+
+def configure_llm_diagnostic_logging(enabled: bool) -> None:
+    """Enable only the dedicated LLM diagnostic logger at DEBUG level."""
+    llm_logger.setLevel(logging.DEBUG if enabled else logging.INFO)

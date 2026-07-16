@@ -32,22 +32,18 @@ async def search_academic_works(
             "ai.pipeline.tool.failed tool=search_academic_works status=unavailable"
         )
         raise ToolUnavailableError("The academic-search executor is unavailable.")
-    effective_limit = min(validated.limit_per_provider, settings.RESULTS_PER_PROVIDER)
-    effective_request = AcademicSearchInput(
-        queries=validated.queries,
-        limit_per_provider=effective_limit,
-    )
+    configured_limit = settings.RESULTS_PER_PROVIDER
     started_at = time.perf_counter()
     logger.info(
         "ai.pipeline.tool.started tool=search_academic_works query_count=%s "
-        "requested_limit=%s effective_limit=%s",
+        "configured_limit=%s effective_limit=%s",
         len(validated.queries),
-        validated.limit_per_provider,
-        effective_limit,
+        configured_limit,
+        configured_limit,
     )
     try:
         execution = AcademicSearchExecutionResult.model_validate(
-            await executor.execute(effective_request)
+            await executor.execute(validated)
         )
     except ToolUnavailableError:
         raise
@@ -66,14 +62,14 @@ async def search_academic_works(
                 raw_results=0,
                 after_deduplication=0,
                 message="The academic-search executor failed.",
-                requested_limit_per_provider=validated.limit_per_provider,
-                effective_limit_per_provider=effective_limit,
+                requested_limit_per_provider=configured_limit,
+                effective_limit_per_provider=configured_limit,
             ),
         )
     public_payload = execution.public_result.model_dump()
     public_payload.update(
-        requested_limit_per_provider=validated.limit_per_provider,
-        effective_limit_per_provider=effective_limit,
+        requested_limit_per_provider=configured_limit,
+        effective_limit_per_provider=configured_limit,
     )
     public_result = AcademicSearchToolResult.model_validate(public_payload)
     result = AcademicSearchExecutionResult(

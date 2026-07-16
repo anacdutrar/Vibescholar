@@ -44,7 +44,7 @@ class AcademicSearchExecutor:
             raise ToolArgumentsValidationError(
                 "This search round requires exactly one academic query."
             )
-        effective_limit = min(validated.limit_per_provider, settings.RESULTS_PER_PROVIDER)
+        effective_limit = settings.RESULTS_PER_PROVIDER
         providers = self._ordered_providers()
         if not providers:
             raise ToolUnavailableError("No academic search provider is enabled.")
@@ -99,7 +99,7 @@ class AcademicSearchExecutor:
                 raw_results=len(raw_candidates),
                 after_deduplication=len(candidates),
                 message=self._message(status),
-                requested_limit_per_provider=validated.limit_per_provider,
+                requested_limit_per_provider=effective_limit,
                 effective_limit_per_provider=effective_limit,
             ),
         )

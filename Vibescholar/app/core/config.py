@@ -43,6 +43,19 @@ def _optional_int(name: str) -> int | None:
     return int(raw)
 
 
+def _boolean(name: str, default: bool = False) -> bool:
+    """Read an explicit boolean environment setting."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value")
+
+
 def _provider_order() -> tuple[str, ...]:
     """Read a non-empty, unique provider precedence list."""
     raw = os.getenv("SEARCH_PROVIDER_ORDER", "openalex,semantic_scholar")
@@ -52,6 +65,19 @@ def _provider_order() -> tuple[str, ...]:
     if len(set(providers)) != len(providers):
         raise ValueError("SEARCH_PROVIDER_ORDER must not contain duplicates")
     return providers
+
+
+def _csv_values(name: str, default: str = "") -> tuple[str, ...]:
+    """Read a stable, unique CSV list while preserving configured spelling."""
+    values: list[str] = []
+    seen: set[str] = set()
+    for raw_value in os.getenv(name, default).split(","):
+        value = raw_value.strip()
+        normalized = value.casefold()
+        if value and normalized not in seen:
+            seen.add(normalized)
+            values.append(value)
+    return tuple(values)
 
 
 class Settings:
@@ -67,18 +93,23 @@ class Settings:
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
     OLLAMA_API_KEY: str = os.getenv("OLLAMA_API_KEY", "")
     OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen3.5:9b")
-    OPENROUTER_BASE_URL: str = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-    OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
-    OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "")
-    LLM_TIMEOUT_SECONDS: int = _positive_int("LLM_TIMEOUT_SECONDS", 1200)
+    OPENROUTER_BASE_URL: str
+    OPENROUTER_API_KEY: str
+    OPENROUTER_MODEL: str
+    OPENROUTER_ALLOWED_MODELS: tuple[str, ...]
+    OPENROUTER_ALLOW_PAID_MODELS: bool
+    EVIDENCE_EVALUATOR_BACKEND: str
+    EVIDENCE_EVALUATOR_MAX_OUTPUT_TOKENS: int
+    LLM_TIMEOUT_SECONDS: int = _positive_int("LLM_TIMEOUT_SECONDS", 50000) #para testes com qwen
     LLM_TEMPERATURE: float
     LLM_TOP_P: float
     LLM_FREQUENCY_PENALTY: float
     LLM_PRESENCE_PENALTY: float
     LLM_SEED: int | None
+    LLM_DIAGNOSTIC_LOGGING: bool
     MAX_SEARCH_ROUNDS: int = _positive_int("MAX_SEARCH_ROUNDS", 3)
     MAX_TOOL_CALLS_PER_ROUND: int = _positive_int("MAX_TOOL_CALLS_PER_ROUND", 1)
-    RESULTS_PER_PROVIDER: int = _positive_int("RESULTS_PER_PROVIDER", 15)
+    RESULTS_PER_PROVIDER: int = _positive_int("RESULTS_PER_PROVIDER", 10)
     EVIDENCE_BATCH_SIZE: int = _positive_int("EVIDENCE_BATCH_SIZE", 5)
     TARGET_STRONG_EVIDENCE: int = _positive_int("TARGET_STRONG_EVIDENCE", 5)
     MAX_PARTIAL_EVIDENCE: int = _positive_int("MAX_PARTIAL_EVIDENCE", 3)
@@ -109,6 +140,30 @@ class Settings:
             "LLM_PRESENCE_PENALTY", 0.0, -2.0, 2.0
         )
         self.LLM_SEED = _optional_int("LLM_SEED")
+        self.LLM_DIAGNOSTIC_LOGGING = _boolean(
+            "LLM_DIAGNOSTIC_LOGGING",
+            False,
+        )
+        self.EVIDENCE_EVALUATOR_BACKEND = os.getenv(
+            "EVIDENCE_EVALUATOR_BACKEND",
+            "ollama",
+        ).strip().casefold()
+        self.OPENROUTER_BASE_URL = os.getenv(
+            "OPENROUTER_BASE_URL",
+            "https://openrouter.ai/api/v1",
+        )
+        self.OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+        self.OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "")
+        self.OPENROUTER_ALLOWED_MODELS = _csv_values("OPENROUTER_ALLOWED_MODELS")
+        self.OPENROUTER_ALLOW_PAID_MODELS = (
+            _boolean("OPENROUTER_ALLOW_PAID_MODELS", False)
+            if self.EVIDENCE_EVALUATOR_BACKEND == "openrouter"
+            else False
+        )
+        self.EVIDENCE_EVALUATOR_MAX_OUTPUT_TOKENS = _positive_int(
+            "EVIDENCE_EVALUATOR_MAX_OUTPUT_TOKENS",
+            2000,
+        )
 
     def __repr__(self) -> str:
         """Return a diagnostic representation that never includes secret values."""

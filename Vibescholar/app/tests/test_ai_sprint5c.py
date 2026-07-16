@@ -122,11 +122,11 @@ def academic_outcome(
         raw_results=len(candidates),
         after_deduplication=len(candidates),
         message="Typed academic result.",
-        requested_limit_per_provider=15,
-        effective_limit_per_provider=15,
+        requested_limit_per_provider=settings.RESULTS_PER_PROVIDER,
+        effective_limit_per_provider=settings.RESULTS_PER_PROVIDER,
     )
     execution = AcademicSearchExecutionResult(candidates=candidates, public_result=public)
-    arguments = AcademicSearchInput(queries=["single academic query"], limit_per_provider=15)
+    arguments = AcademicSearchInput(queries=["single academic query"])
     call = SearchToolCallRecord(
         tool_call_id="call-academic",
         tool_name=SearchToolName.SEARCH_ACADEMIC_WORKS,
